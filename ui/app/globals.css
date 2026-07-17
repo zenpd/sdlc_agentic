@@ -379,6 +379,7 @@ html, body {
 .log-line-dash.success { color: var(--color-green); }
 .log-line-dash.error { color: var(--color-red); }
 .log-line-dash.info { color: var(--color-text-secondary); }
+.log-line-dash.warning { color: #f59e0b; }
 
 /* ── brass theme (login page only) ── */
 :root {
@@ -645,6 +646,31 @@ html, body {
   margin: 0 14px;
 }
 
+/* ── confetti animation ── */
+@keyframes confettiFall {
+  0%   { transform: translateY(-8px) rotate(0deg);   opacity: 1; }
+  100% { transform: translateY(130px) rotate(720deg); opacity: 0; }
+}
+
+/* ── dark mode ── */
+html.dark {
+  --color-bg: #0a0a12;
+  --color-surface: #111118;
+  --color-text: #f0f0ff;
+  --color-text-secondary: #a8a8c0;
+  --color-text-muted: #5a5a78;
+  --color-border: #1e1e2e;
+  --color-accent-light: #1a1a2e;
+}
+html.dark, html.dark body { background: var(--color-bg); color: var(--color-text); }
+html.dark .navbar {
+  background: rgba(17,17,24,.88);
+  border-bottom-color: var(--color-border);
+}
+html.dark .step-visual { background: #0a0a16; }
+html.dark .badge.pending { background: #1a1a2e; }
+html.dark .footer { background: var(--color-surface); border-top-color: var(--color-border); }
+
 /* ── responsive ── */
 @media (max-width:960px) {
   .pipeline { grid-template-columns: 1fr; }
@@ -652,6 +678,7 @@ html, body {
   .hero h1 { font-size: 42px; }
   .features { grid-template-columns: repeat(2,1fr); }
   .nav-links { display: none; }
+  .hamburger { display: flex !important; }
 }
 @media (max-width:600px) {
   .hero { padding: 60px 24px 40px; }

@@ -2,10 +2,12 @@ export default function StatCard({
   label,
   value,
   accent,
+  trend,
 }: {
   label: string;
   value: string;
   accent?: string;
+  trend?: { value: number; direction: 'up' | 'down' };
 }) {
   return (
     <div
@@ -36,10 +38,19 @@ export default function StatCard({
           color: accent ?? 'var(--color-text)',
           fontFamily: 'var(--font-mono)',
           lineHeight: 1.1,
+          marginBottom: trend ? 8 : 0,
         }}
       >
         {value}
       </div>
+      {trend && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, fontWeight: 600 }}>
+          <span style={{ color: trend.direction === 'up' ? 'var(--color-green)' : 'var(--color-red)' }}>
+            {trend.direction === 'up' ? '↑' : '↓'} {Math.abs(trend.value)}%
+          </span>
+          <span style={{ color: 'var(--color-text-muted)', fontWeight: 400 }}>vs prev 3d</span>
+        </div>
+      )}
     </div>
   );
 }
