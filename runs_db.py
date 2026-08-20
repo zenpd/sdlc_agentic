@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import threading
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -123,5 +124,40 @@ def get_stats() -> dict:
     human = conn.execute(
         "SELECT COUNT(*) c FROM runs WHERE status = 'human'"
     ).fetchone()["c"]
+
+    success_rate = round((success / total) * 100) if total else 0
+
+    avg_row = conn.execute(
+        "SELECT AVG(duration_sec) a FROM runs WHERE duration_sec IS NOT NULL"
+    ).fetchone()
+    avg_duration_sec = int(avg_row["a"]) if avg_row["a"] is not None else None
+
+    daily = []
+    today = datetime.now(timezone.utc).date()
+    for i in range(6, -1, -1):
+        day = today - timedelta(days=i)
+        row = conn.execute(
+            """
+            SELECT
+              SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) s,
+              SUM(CASE WHEN status IN ('failed', 'error') THEN 1 ELSE 0 END) f
+            FROM runs WHERE substr(started_at, 1, 10) = ?
+            """,
+            (day.isoformat(),),
+        ).fetchone()
+        daily.append({
+            "date": day.strftime("%b %d"),
+            "success": row["s"] or 0,
+            "failed": row["f"] or 0,
+        })
+
     conn.close()
-    return {"total": total, "success": success, "failed": failed, "human": human}
+    return {
+        "total": total,
+        "success": success,
+        "failed": failed,
+        "human": human,
+        "success_rate": success_rate,
+        "avg_duration_sec": avg_duration_sec,
+        "daily": daily,
+    }

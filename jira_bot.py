@@ -277,6 +277,11 @@ def run_pipeline(
         on_step("agent", "failed", msg)
         raise PipelineHalt("failed", msg)
 
+    # Snapshot HEAD so the verify step can detect changes the agent commits
+    # itself, not just changes left uncommitted in the working tree.
+    _, base_commit, _ = run_cmd(["git", "rev-parse", "HEAD"], repo_dir)
+    base_commit = base_commit.strip()
+
     # Build task from ticket
     task_prompt = (
         f"Jira Ticket {resolved_key}: {summary}\n\n"
@@ -332,8 +337,23 @@ def run_pipeline(
     # ── STEP 4: VERIFY SUCCESS ─────────────────────────────────────
     step("6/8  VERIFY — Checking agent's work")
 
-    rc, stdout, _ = run_cmd(["git", "diff", "--name-only"], repo_dir)
-    modified_files = [f for f in stdout.strip().split("\n") if f.strip()]
+    # Combine two sources of change: (1) commits the agent made itself on top
+    # of base_commit, and (2) anything left uncommitted in the working tree
+    # (modified, staged, deleted, renamed, or untracked/new files - a plain
+    # `git diff --name-only` misses brand-new untracked files entirely).
+    modified_files = []
+    _, committed_stdout, _ = run_cmd(["git", "diff", "--name-only", base_commit, "HEAD"], repo_dir)
+    modified_files.extend(f for f in committed_stdout.strip().split("\n") if f.strip())
+
+    _, status_stdout, _ = run_cmd(["git", "status", "--porcelain"], repo_dir)
+    for line in status_stdout.strip().split("\n"):
+        if not line.strip():
+            continue
+        path = line[3:]
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        if path not in modified_files:
+            modified_files.append(path)
 
     if not modified_files:
         msg = "Agent made no changes to the repository."
@@ -384,10 +404,17 @@ def run_pipeline(
         repo_dir,
     )
     if rc != 0:
-        msg = "Nothing to commit (already up to date)"
-        print(f"  ⚠️  {msg}")
-        on_step("pr", "failed", msg)
-        raise PipelineHalt("human", msg)
+        # The agent may have already committed its own changes mid-run (verified
+        # above via base_commit..HEAD), in which case there's nothing left to
+        # stage here - that's fine, not an error. Only halt if HEAD truly never
+        # moved past base_commit.
+        _, head_now, _ = run_cmd(["git", "rev-parse", "HEAD"], repo_dir)
+        if head_now.strip() == base_commit:
+            msg = "Nothing to commit (already up to date)"
+            print(f"  ⚠️  {msg}")
+            on_step("pr", "failed", msg)
+            raise PipelineHalt("human", msg)
+        print("  [OK] Agent already committed its changes; nothing further to stage")
 
     push_url = f"https://{GITHUB_TOKEN}@github.com/{target_repo}.git"
     print(f"  Git push to: https://<token>@github.com/{target_repo}.git {branch_name}")
