@@ -1,6 +1,24 @@
+[project]
+name = "sdlc-agentic"
+version = "0.1.0"
+description = "Jira/Azure DevOps ticket-to-PR automation bot, built on the OpenHands SDK."
+requires-python = ">=3.13"
+dependencies = [
+    # Previously rode in transitively via the (now-removed) openhands-agent-server
+    # workspace member — declared explicitly now that it's gone.
+    "fastapi>=0.104",
+    "uvicorn>=0.30",
+    "requests>=2.31",
+    "python-dotenv>=1.0",
+    "jira>=3.10.5",
+    "python-frontmatter>=1.1",
+    "openhands-sdk",
+    "openhands-tools",
+]
+
 # UV workspace configuration
 [tool.uv.workspace]
-members = ["openhands-sdk", "openhands-tools", "openhands-workspace", "openhands-agent-server"]
+members = ["openhands-sdk", "openhands-tools"]
 
 # Security: Apply workspace-wide dependency guardrails.
 [tool.uv]
@@ -22,8 +40,6 @@ constraint-dependencies = [
 [tool.uv.sources]
 openhands-sdk = { workspace = true }
 openhands-tools = { workspace = true }
-openhands-workspace = { workspace = true }
-openhands-agent-server = { workspace = true }
 
 [dependency-groups]
 dev = [
@@ -44,7 +60,6 @@ dev = [
     "streamlit>=1.49.1",
     "pytest-timeout>=2.4.0",
     "griffe[pypi]>=2.0.0",
-    "jira>=3.10.5",
 ]
 
 # Ruff configuration
@@ -73,7 +88,7 @@ extend-select = ["B006", "B008", "B039", "RUF012"]
 
 [tool.ruff.lint.per-file-ignores]
 # Test files often have unused arguments (fixtures, mocks, interface implementations)
-"tests/**/*.py" = ["ARG"]
+"backend/tests/**/*.py" = ["ARG"]
 
 
 # Allowlist safe default calls for flake8-bugbear rules (e.g., FastAPI Depends)
@@ -89,37 +104,29 @@ combine-as-imports = true
 force-single-line = false
 lines-after-imports = 2
 
-# Pytest configuration
+# Pytest configuration — this app has no tests yet; testpaths points at
+# backend/tests/ so `uv run pytest` is ready the moment tests are added there.
 [tool.pytest.ini_options]
 testpaths = [
-    "tests"
+    "backend/tests"
 ]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = "-v --tb=short -m 'not stress'"
+addopts = "-v --tb=short"
 asyncio_mode = "auto"
-markers = [
-    "stress: stress / scale tests, deselected by default. Run with `pytest -m stress` (see tests/agent_server/stress/__init__.py for details).",
-]
 
 # Pyright configuration for PEP 420 namespace packages
-# This is needed for VSCode to properly resolve imports across multiple packages in the monorepo
+# This is needed for VSCode to properly resolve imports across multiple packages in the repo
 [tool.pyright]
 include = [
     "openhands-sdk",
     "openhands-tools",
-    "openhands-workspace",
-    "openhands-agent-server",
-    "examples",
-    "tests",
-    "scripts"
+    "backend"
 ]
 extraPaths = [
     "openhands-sdk",
-    "openhands-tools",
-    "openhands-workspace",
-    "openhands-agent-server"
+    "openhands-tools"
 ]
 venvPath = "."
 venv = ".venv"

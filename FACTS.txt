@@ -1,3 +1,0 @@
-1. This project is the Open Hands software-agent-sdk, which is likely a software development kit for building AI agents.
-2. The project uses a PowerShell environment for command execution and file management.
-3. The project includes tools for file editing, task tracking, and terminal command execution to facilitate development workflows.

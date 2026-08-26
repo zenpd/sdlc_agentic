@@ -9,6 +9,8 @@ const NAV_ITEMS = [
   { label: 'Dashboard', href: '/dashboard' },
   { label: 'Run', href: '/run' },
   { label: 'Logs', href: '/logs' },
+  { label: 'Skills', href: '/skills' },
+  { label: 'Config', href: '/config' },
 ];
 
 function SunIcon() {

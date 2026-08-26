@@ -67,6 +67,84 @@ export function runTicket(ticketKey: string): Promise<{ run_id: string }> {
   });
 }
 
+export type SkillSummary = {
+  slug: string;
+  name?: string;
+  description?: string;
+  sdlc_stage?: string;
+  keywords?: string[];
+  error?: string;
+};
+
+export type SkillContent = {
+  slug: string;
+  content: string;
+};
+
+export function listSkills(): Promise<SkillSummary[]> {
+  return request<SkillSummary[]>('/api/skills');
+}
+
+export function getSkill(slug: string): Promise<SkillContent> {
+  return request<SkillContent>(`/api/skills/${slug}`);
+}
+
+export function saveSkill(slug: string, content: string): Promise<SkillContent> {
+  return request<SkillContent>(`/api/skills/${slug}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content }),
+  });
+}
+
+export function createSkill(slug: string, content: string): Promise<SkillContent> {
+  return request<SkillContent>(`/api/skills?slug=${encodeURIComponent(slug)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content }),
+  });
+}
+
+// Non-secret fields come back as plain strings; secret fields come back as
+// {set: boolean} so a raw token/key value is never present in the response.
+export type SecretField = { set: boolean };
+
+export type IntegrationConfig = {
+  TICKET_PROVIDER: string;
+  JIRA_BASE_URL: string;
+  JIRA_USER_EMAIL: string;
+  JIRA_JQL: string;
+  ADO_ORG_URL: string;
+  ADO_PROJECT: string;
+  ADO_ASSIGNEE: string;
+  ADO_WIQL: string;
+  TARGET_REPO: string;
+  TARGET_BRANCH: string;
+  AZURE_OPENAI_ENDPOINT: string;
+  AZURE_OPENAI_DEPLOYMENT: string;
+  STATUS_DONE: string;
+  STATUS_IN_PROGRESS: string;
+  STATUS_FAILED: string;
+  JIRA_API_TOKEN: SecretField;
+  ADO_PAT: SecretField;
+  GITHUB_TOKEN: SecretField;
+  AZURE_OPENAI_API_KEY: SecretField;
+};
+
+export type ConfigUpdate = Partial<Record<keyof IntegrationConfig, string>>;
+
+export function getConfig(): Promise<IntegrationConfig> {
+  return request<IntegrationConfig>('/api/config');
+}
+
+export function updateConfig(updates: ConfigUpdate): Promise<IntegrationConfig> {
+  return request<IntegrationConfig>('/api/config', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(updates),
+  });
+}
+
 export function formatDuration(sec: number | null): string {
   if (sec == null) return '—';
   if (sec < 60) return `${sec}s`;

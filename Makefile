@@ -12,9 +12,9 @@ UNDERLINE := \033[4m
 
 # Required uv version
 REQUIRED_UV_VERSION := 0.8.13
-PKGS ?= openhands-sdk openhands-tools openhands-workspace openhands-agent-server
+PKGS ?= openhands-sdk openhands-tools
 
-.PHONY: build format lint clean help check-uv-version
+.PHONY: build format lint clean help check-uv-version run-backend run-frontend
 
 # Default target
 .DEFAULT_GOAL := help
@@ -32,7 +32,7 @@ check-uv-version:
 	$(ECHO) "$(GREEN)uv version $$UV_VERSION meets requirements$(RESET)"
 
 build: check-uv-version
-	@$(ECHO) "$(CYAN)Setting up OpenHands V1 development environment...$(RESET)"
+	@$(ECHO) "$(CYAN)Setting up the Agent SDLC development environment...$(RESET)"
 	@$(ECHO) "$(YELLOW)Installing dependencies with uv sync --dev...$(RESET)"
 	@uv sync --dev
 	@$(ECHO) "$(GREEN)Dependencies installed successfully.$(RESET)"
@@ -40,6 +40,14 @@ build: check-uv-version
 	@uv run pre-commit install
 	@$(ECHO) "$(GREEN)Pre-commit hooks installed successfully.$(RESET)"
 	@$(ECHO) "$(GREEN)Build complete! Development environment is ready.$(RESET)"
+
+run-backend:
+	@$(ECHO) "$(CYAN)Starting FastAPI backend on :8040...$(RESET)"
+	@uv run uvicorn backend.api_server:app --host 127.0.0.1 --port 8040
+
+run-frontend:
+	@$(ECHO) "$(CYAN)Starting Next.js dashboard...$(RESET)"
+	@cd ui && npm run dev
 
 format:
 	@$(ECHO) "$(YELLOW)Formatting code with uv format...$(RESET)"
@@ -66,33 +74,19 @@ clean:
 
 # Show help
 help:
-	@$(ECHO) "$(CYAN)OpenHands V1 Makefile$(RESET)"
+	@$(ECHO) "$(CYAN)Agent SDLC Makefile$(RESET)"
 	@$(ECHO) ""
 	@$(ECHO) "$(UNDERLINE)Usage:$(RESET) make <COMMAND>"
 	@$(ECHO) ""
 	@$(ECHO) "$(UNDERLINE)Commands:$(RESET)"
 	@$(ECHO) "  $(GREEN)build$(RESET)                Setup development environment (install deps + hooks)"
-	@$(ECHO) "  $(GREEN)build-server$(RESET)         Build agent-server executable"
-	@$(ECHO) "  $(GREEN)test-server-schema$(RESET)   Test server schema"
+	@$(ECHO) "  $(GREEN)run-backend$(RESET)          Run the FastAPI backend on :8040"
+	@$(ECHO) "  $(GREEN)run-frontend$(RESET)         Run the Next.js dashboard dev server"
 	@$(ECHO) "  $(GREEN)format$(RESET)               Format code with uv format"
 	@$(ECHO) "  $(GREEN)lint$(RESET)                 Lint code with ruff"
 	@$(ECHO) "  $(GREEN)pre-commit$(RESET)           Run the pre-commit"
 	@$(ECHO) "  $(GREEN)clean$(RESET)                Clean up cache files"
 	@$(ECHO) "  $(GREEN)help$(RESET)                 Show this help message"
-
-build-server: check-uv-version
-	@$(ECHO) "$(CYAN)Building agent-server executable...$(RESET)"
-	@uv run pyinstaller openhands-agent-server/openhands/agent_server/agent-server.spec
-	@$(ECHO) "$(GREEN)Build complete! Executable is in dist/agent-server/$(RESET)"
-
-test-server-schema: check-uv-version
-	set -euo pipefail;
-	# Generate OpenAPI JSON inline (no file left in repo)
-	uv run python -c 'import os,json; from openhands.agent_server.api import api; open("openapi.json","w").write(json.dumps(api.openapi(), indent=2))'
-	npx --yes @apidevtools/swagger-cli@^4 validate openapi.json
-	# Clean up temp schema
-	rm -f openapi.json
-	rm -rf .client
 
 
 .PHONY: set-package-version
