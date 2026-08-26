@@ -15,6 +15,7 @@ downloads/
 eggs/
 .eggs/
 lib/
+!ui/lib/
 lib64/
 parts/
 sdist/
@@ -117,6 +118,12 @@ celerybeat.pid
 
 # SageMath parsed files
 *.sage.py
+
+# Local pipeline run history/state — mutable, machine-specific, and can end up
+# holding secrets in error-message logs (e.g. a bad token embedded in a failed
+# git clone/push URL). Never version this.
+runs.db
+runs.db-journal
 
 # Environments
 .env
