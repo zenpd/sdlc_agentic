@@ -4,6 +4,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import Nav from '@/components/Nav';
 import StepTracker from '@/components/StepTracker';
 import StatusBadge from '@/components/StatusBadge';
+import AgentActivity from '@/components/AgentActivity';
 import { runTicket, getRunStatus, formatDuration, type RunRecord, type StepInfo } from '@/lib/api';
 
 const STEPS: StepInfo[] = [
@@ -13,7 +14,7 @@ const STEPS: StepInfo[] = [
   { key: 'gate', label: 'Clarity gate', state: 'pending' },
   { key: 'agent', label: 'Agent coding & testing', state: 'pending' },
   { key: 'pr', label: 'Opening PR', state: 'pending' },
-  { key: 'jira', label: 'Updating Jira', state: 'pending' },
+  { key: 'jira', label: 'Updating Ticket', state: 'pending' },
 ];
 
 const CONFETTI_PIECES = [
@@ -147,19 +148,22 @@ export default function RunPage() {
 
       <Nav />
 
-      <div className="content" style={{ maxWidth: 900, margin: '0 auto', padding: '84px 32px 48px' }}>
-        <h1 style={{ fontSize: 28, fontWeight: 800, marginBottom: 32, letterSpacing: '-0.01em' }}>
-          Run Pipeline
-        </h1>
+      <div className="content" style={{ maxWidth: 900, margin: '0 auto', padding: '40px 32px 48px' }}>
+        <div className="card-main" style={{ padding: '20px 24px', marginBottom: 24 }}>
+          <h1 style={{ fontSize: 24, fontWeight: 800, letterSpacing: '-0.01em' }}>Run Pipeline</h1>
+          <p style={{ fontSize: 13, color: 'var(--color-text-secondary)', marginTop: 4 }}>
+            Trigger a pipeline run for a specific ticket or work item.
+          </p>
+        </div>
 
         {/* Input */}
-        <div className="card-main" style={{ padding: 28, marginBottom: 40 }}>
+        <div className="card-main" style={{ padding: 28, marginBottom: 24 }}>
           <div style={{ display: 'flex', alignItems: 'flex-end', gap: 16 }}>
             <div style={{ flex: 1 }}>
-              <label className="label-main">Jira Ticket Key</label>
+              <label className="label-main">Ticket ID</label>
               <input
                 className="input-main"
-                placeholder="e.g. KAN-1"
+                placeholder="e.g. KAN-1 or 668"
                 value={ticketKey}
                 onChange={(e) => setTicketKey(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Enter') handleRun(); }}
@@ -202,10 +206,17 @@ export default function RunPage() {
               </div>
             </div>
 
+            <AgentActivity
+              ticketKey={ticketKey}
+              logs={logs}
+              stepStates={stepStates}
+              prUrl={prUrl}
+            />
+
             <StepTracker
               steps={STEPS.map(({ state, ...rest }) => rest)}
               states={stepStates}
-              logs={logs}
+              logs={{ ...logs, agent: [] }}
             />
 
             {isTerminal && (
@@ -245,7 +256,7 @@ export default function RunPage() {
         {!runId && !running && (
           <div style={{ textAlign: 'center', paddingTop: 72 }}>
             <p style={{ color: 'var(--color-text-muted)', fontSize: 14 }}>
-              Enter a Jira ticket key and click Run Pipeline to start.
+              Enter a ticket ID and click Run Pipeline to start.
             </p>
           </div>
         )}

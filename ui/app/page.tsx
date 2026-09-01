@@ -26,10 +26,10 @@ export default function HomePage() {
             Autonomous <span className="gradient">SDLC Agent</span>
           </h1>
           <div className="hero-sub">
-            Jira Ticket In <span className="arrow-em">→</span> Pull Request Out
+            Ticket In <span className="arrow-em">→</span> Pull Request Out
           </div>
           <p className="hero-desc">
-            An autonomous engineering agent that reads your Jira ticket, writes production code,
+            An autonomous engineering agent that reads your ticket, writes production code,
             generates tests, validates CI locally, and opens a review-ready pull request — without human intervention.
           </p>
           <div className="hero-cta">
@@ -65,7 +65,7 @@ export default function HomePage() {
                 </div>
               </div>
               <div className="step-title">Ticket Ingested</div>
-              <div className="step-desc">Agent reads the Jira ticket, acceptance criteria, and linked design docs.</div>
+              <div className="step-desc">Agent reads the ticket, acceptance criteria, and linked design docs.</div>
               <div className="step-visual">
                 <div className="ticket-id">PROJ-482</div>
                 <div className="ticket-title">Add rate-limit middleware to /api/v2/checkout</div>

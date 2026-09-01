@@ -109,6 +109,42 @@ def _noop_on_step(step: str, state: str, log: Optional[str] = None) -> None:
     pass
 
 
+def _make_agent_event_logger(on_step_fn: OnStep):
+    """Builds a Conversation `callbacks=` function that turns the agent's live
+    tool calls/results into short log lines pushed onto the 'agent' step, so
+    the UI can show what the agent is actually doing (which command, which
+    file) instead of one opaque spinner for the whole run.
+
+    Tagged with `[TOOL:...]` / `[RESULT:...]` / `[AGENT-ERROR]` prefixes so the
+    frontend can parse out an animated "what's happening now" view; still
+    reads fine as a plain log if left untouched.
+    """
+    from openhands.sdk.event import ActionEvent, AgentErrorEvent, ObservationEvent
+
+    def _on_agent_event(event) -> None:
+        if isinstance(event, ActionEvent):
+            action = event.action
+            if event.tool_name == "terminal" and action is not None:
+                cmd = (getattr(action, "command", "") or "")[:160]
+                on_step_fn("agent", "in-progress", f"[TOOL:terminal] $ {cmd}")
+            elif event.tool_name == "file_editor" and action is not None:
+                path = getattr(action, "path", "")
+                cmd = getattr(action, "command", "")
+                on_step_fn("agent", "in-progress", f"[TOOL:file_editor] {cmd} -> {path}")
+            elif event.tool_name == "task_tracker" and action is not None:
+                cmd = getattr(action, "command", "")
+                on_step_fn("agent", "in-progress", f"[TOOL:task_tracker] {cmd}")
+            else:
+                on_step_fn("agent", "in-progress", f"[TOOL:{event.tool_name}] called")
+        elif isinstance(event, ObservationEvent):
+            status = "FAILED" if event.observation.is_error else "ok"
+            on_step_fn("agent", "in-progress", f"[RESULT:{event.tool_name}] {status}")
+        elif isinstance(event, AgentErrorEvent):
+            on_step_fn("agent", "in-progress", f"[AGENT-ERROR] {event.error[:200]}")
+
+    return _on_agent_event
+
+
 # ── Helpers ─────────────────────────────────────────────────────────
 def run_cmd(cmd: list[str], cwd: Path | None = None, silent: bool = False) -> tuple[int, str, str]:
     """Run a command, return (exit_code, stdout, stderr)."""
@@ -425,6 +461,7 @@ def run_pipeline(
     conversation = Conversation(
         agent=agent,
         workspace=str(repo_dir),
+        callbacks=[_make_agent_event_logger(on_step)],
     )
 
     print(f"  Agent workspace: {repo_dir}")
@@ -445,23 +482,24 @@ def run_pipeline(
     # ── STEP 4: VERIFY SUCCESS ─────────────────────────────────────
     step("6/8  VERIFY — Checking agent's work")
 
-    # Combine two sources of change: (1) commits the agent made itself on top
-    # of base_commit, and (2) anything left uncommitted in the working tree
-    # (modified, staged, deleted, renamed, or untracked/new files - a plain
-    # `git diff --name-only` misses brand-new untracked files entirely).
+    # Combine three sources of change, each queried with a dedicated
+    # `--name-only`-style command so every path comes back unprefixed —
+    # no manual slicing of `git status --porcelain`'s status-code columns,
+    # which is fragile (rename/staged/unstaged lines don't all use the same
+    # column width) and previously corrupted paths (e.g. "src/app.py" -> "rc/app.py"):
+    # (1) commits the agent made itself on top of base_commit, (2) tracked
+    # files modified/staged but not committed, (3) brand-new untracked files.
     modified_files = []
     _, committed_stdout, _ = run_cmd(["git", "diff", "--name-only", base_commit, "HEAD"], repo_dir)
-    modified_files.extend(f for f in committed_stdout.strip().split("\n") if f.strip())
+    _, unstaged_stdout, _ = run_cmd(["git", "diff", "--name-only"], repo_dir)
+    _, staged_stdout, _ = run_cmd(["git", "diff", "--name-only", "--cached"], repo_dir)
+    _, untracked_stdout, _ = run_cmd(["git", "ls-files", "--others", "--exclude-standard"], repo_dir)
 
-    _, status_stdout, _ = run_cmd(["git", "status", "--porcelain"], repo_dir)
-    for line in status_stdout.strip().split("\n"):
-        if not line.strip():
-            continue
-        path = line[3:]
-        if " -> " in path:
-            path = path.split(" -> ", 1)[1]
-        if path not in modified_files:
-            modified_files.append(path)
+    for stdout in (committed_stdout, unstaged_stdout, staged_stdout, untracked_stdout):
+        for path in stdout.strip().split("\n"):
+            path = path.strip()
+            if path and path not in modified_files:
+                modified_files.append(path)
 
     if not modified_files:
         msg = "Agent made no changes to the repository."

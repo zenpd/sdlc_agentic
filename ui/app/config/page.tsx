@@ -139,26 +139,28 @@ export default function ConfigPage() {
 
       <Nav />
 
-      <div className="content" style={{ maxWidth: 900, margin: '0 auto', padding: '84px 32px 48px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 8, flexWrap: 'wrap' }}>
-          <h1 style={{ fontSize: 28, fontWeight: 800, letterSpacing: '-0.01em' }}>Integration Config</h1>
-          <div style={{ flex: 1 }} />
-          {saved && <span style={{ fontSize: 13, color: 'var(--color-green)' }}>✓ Saved</span>}
-          <button
-            onClick={handleSave}
-            disabled={saving || loading}
-            className="btn-primary"
-            style={{ padding: '10px 20px', fontSize: 13, opacity: saving || loading ? 0.5 : 1 }}
-          >
-            {saving ? 'Saving…' : 'Save changes'}
-          </button>
+      <div className="content" style={{ maxWidth: 900, margin: '0 auto', padding: '40px 32px 48px' }}>
+        <div className="card-main" style={{ padding: '20px 24px', marginBottom: 24 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 8, flexWrap: 'wrap' }}>
+            <h1 style={{ fontSize: 24, fontWeight: 800, letterSpacing: '-0.01em' }}>Integration Config</h1>
+            <div style={{ flex: 1 }} />
+            {saved && <span style={{ fontSize: 13, color: 'var(--color-green)' }}>✓ Saved</span>}
+            <button
+              onClick={handleSave}
+              disabled={saving || loading}
+              className="btn-primary"
+              style={{ padding: '10px 20px', fontSize: 13, opacity: saving || loading ? 0.5 : 1 }}
+            >
+              {saving ? 'Saving…' : 'Save changes'}
+            </button>
+          </div>
+          <p style={{ fontSize: 13, color: 'var(--color-text-secondary)', maxWidth: 620 }}>
+            Writes straight to the backend&apos;s .env file — never leaves this
+            machine. Token/key fields never round-trip back to the browser; leave
+            one blank to keep its current value. Most settings apply on the very
+            next pipeline run, no restart needed.
+          </p>
         </div>
-        <p style={{ fontSize: 13, color: 'var(--color-text-secondary)', marginBottom: 28, maxWidth: 620 }}>
-          Writes straight to the backend&apos;s .env file — never leaves this
-          machine. Token/key fields never round-trip back to the browser; leave
-          one blank to keep its current value. Most settings apply on the very
-          next pipeline run, no restart needed.
-        </p>
 
         {error && (
           <div style={{
