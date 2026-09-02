@@ -5,6 +5,7 @@ import Nav from '@/components/Nav';
 import StepTracker from '@/components/StepTracker';
 import StatusBadge from '@/components/StatusBadge';
 import AgentActivity from '@/components/AgentActivity';
+import StageProgress from '@/components/StageProgress';
 import { runTicket, getRunStatus, formatDuration, type RunRecord, type StepInfo } from '@/lib/api';
 
 const STEPS: StepInfo[] = [
@@ -204,6 +205,13 @@ export default function RunPage() {
                 )}
                 {status && <StatusBadge status={status} />}
               </div>
+            </div>
+
+            <div style={{ marginBottom: 28 }}>
+              <StageProgress
+                stages={STEPS.map(({ key, label }) => ({ key, label }))}
+                states={stepStates}
+              />
             </div>
 
             <AgentActivity

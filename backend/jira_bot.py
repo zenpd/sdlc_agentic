@@ -115,10 +115,16 @@ def _make_agent_event_logger(on_step_fn: OnStep):
     the UI can show what the agent is actually doing (which command, which
     file) instead of one opaque spinner for the whole run.
 
-    Tagged with `[TOOL:...]` / `[RESULT:...]` / `[AGENT-ERROR]` prefixes so the
-    frontend can parse out an animated "what's happening now" view; still
-    reads fine as a plain log if left untouched.
+    Tagged with `[TOOL:...]` / `[RESULT:...]` / `[DIFF:...]` / `[AGENT-ERROR]`
+    prefixes so the frontend can parse out an animated "what's happening now"
+    view; still reads fine as a plain log if left untouched.
+
+    `[DIFF:file_editor]` is the detailed one: FileEditorObservation carries the
+    full before/after file content, so a real unified diff (exact line numbers,
+    +/- lines) can be computed here — not just "file_editor touched app.py: ok".
     """
+    import difflib
+
     from openhands.sdk.event import ActionEvent, AgentErrorEvent, ObservationEvent
 
     def _on_agent_event(event) -> None:
@@ -130,15 +136,40 @@ def _make_agent_event_logger(on_step_fn: OnStep):
             elif event.tool_name == "file_editor" and action is not None:
                 path = getattr(action, "path", "")
                 cmd = getattr(action, "command", "")
-                on_step_fn("agent", "in-progress", f"[TOOL:file_editor] {cmd} -> {path}")
+                detail = ""
+                if cmd == "insert" and getattr(action, "insert_line", None) is not None:
+                    detail = f" (at line {action.insert_line})"
+                elif cmd == "view" and getattr(action, "view_range", None):
+                    a, b = action.view_range
+                    detail = f" (lines {a}-{b})"
+                on_step_fn("agent", "in-progress", f"[TOOL:file_editor] {cmd} -> {path}{detail}")
             elif event.tool_name == "task_tracker" and action is not None:
                 cmd = getattr(action, "command", "")
                 on_step_fn("agent", "in-progress", f"[TOOL:task_tracker] {cmd}")
             else:
                 on_step_fn("agent", "in-progress", f"[TOOL:{event.tool_name}] called")
         elif isinstance(event, ObservationEvent):
-            status = "FAILED" if event.observation.is_error else "ok"
+            obs = event.observation
+            status = "FAILED" if obs.is_error else "ok"
             on_step_fn("agent", "in-progress", f"[RESULT:{event.tool_name}] {status}")
+
+            if (
+                event.tool_name == "file_editor"
+                and not obs.is_error
+                and getattr(obs, "command", None) in ("str_replace", "insert", "create")
+                and getattr(obs, "new_content", None) is not None
+            ):
+                old_lines = (getattr(obs, "old_content", None) or "").splitlines()
+                new_lines = obs.new_content.splitlines()
+                hunks = list(difflib.unified_diff(old_lines, new_lines, lineterm="", n=1))
+                body = [ln for ln in hunks if not (ln.startswith("---") or ln.startswith("+++"))]
+                if body:
+                    truncated = len(body) > 24
+                    snippet = "\n".join(body[:24])
+                    if truncated:
+                        snippet += f"\n... ({len(body) - 24} more lines)"
+                    path = getattr(obs, "path", "") or ""
+                    on_step_fn("agent", "in-progress", f"[DIFF:file_editor] {path}\n{snippet}")
         elif isinstance(event, AgentErrorEvent):
             on_step_fn("agent", "in-progress", f"[AGENT-ERROR] {event.error[:200]}")
 
@@ -332,7 +363,7 @@ def run_pipeline(
     if word_count < 5:
         msg = f"Ticket description is too short ({word_count} words). Please provide more detail including specific packages, versions, and repository to modify."
         print(f"  !! {msg}")
-        on_step("gate", "failed", msg)
+        on_step("gate", "human", msg)
         ticket(TicketAction(command="add_comment", ticket_key=resolved_key, comment_text=msg))
         ticket(TicketAction(command="update_status", ticket_key=resolved_key, target_status=STATUS_FAILED))
         raise PipelineHalt("human", msg)
@@ -383,7 +414,7 @@ def run_pipeline(
     if not gate_ok:
         ticket(TicketAction(command="add_comment", ticket_key=resolved_key, comment_text=f"Ticket needs more detail: {gate_text.strip()}"))
         ticket(TicketAction(command="update_status", ticket_key=resolved_key, target_status=STATUS_FAILED))
-        on_step("gate", "failed", gate_text.strip()[:200])
+        on_step("gate", "human", gate_text.strip()[:200])
         raise PipelineHalt("human", gate_text.strip())
 
     on_step("gate", "success", gate_text.strip()[:200])
@@ -435,6 +466,10 @@ def run_pipeline(
         "CRITICAL: Do NOT ask me clarifying questions — just use your best judgment to interpret packages.\n"
         "Correct likely typos (e.g. 'pydentic' -> 'pydantic', 'trasformers' -> 'transformers', 'langraph' -> 'langgraph').\n"
         "IMPORTANT: Do NOT run 'pip install' or any package installation — it is too slow and unnecessary.\n"
+        "IMPORTANT: Do NOT start a local dev server, HTTP server, or any other long-running/blocking "
+        "process to manually test your change (e.g. 'npm run dev', 'python -m http.server') — there is "
+        "no browser here to view it with, and interrupting a blocking command can crash your terminal "
+        "session. Verify purely by reading the code and running 'git diff'.\n"
         "Just edit the file, verify with 'git diff', then call finish."
     )
 
@@ -476,7 +511,7 @@ def run_pipeline(
         msg = f"Agent run failed: {str(e)[:300]}"
         ticket(TicketAction(command="add_comment", ticket_key=resolved_key, comment_text=msg))
         ticket(TicketAction(command="update_status", ticket_key=resolved_key, target_status=STATUS_FAILED))
-        on_step("agent", "failed", msg)
+        on_step("agent", "human", msg)
         raise PipelineHalt("human", msg)
 
     # ── STEP 4: VERIFY SUCCESS ─────────────────────────────────────
@@ -506,7 +541,7 @@ def run_pipeline(
         print(f"  !! {msg}")
         ticket(TicketAction(command="add_comment", ticket_key=resolved_key, comment_text=msg))
         ticket(TicketAction(command="update_status", ticket_key=resolved_key, target_status=STATUS_FAILED))
-        on_step("agent", "failed", msg)
+        on_step("agent", "human", msg)
         raise PipelineHalt("human", msg)
 
     print(f"  [OK] Modified files: {modified_files}")
@@ -528,7 +563,7 @@ def run_pipeline(
             print(f"  !! {msg}")
             ticket(TicketAction(command="add_comment", ticket_key=resolved_key, comment_text=msg))
             ticket(TicketAction(command="update_status", ticket_key=resolved_key, target_status=STATUS_FAILED))
-            on_step("agent", "failed", msg)
+            on_step("agent", "human", msg)
             raise PipelineHalt("human", msg)
 
     print("  [OK] Work verified successfully")
@@ -538,12 +573,26 @@ def run_pipeline(
     on_step("pr", "in-progress")
     step("7/8  PR — Creating branch, committing, and opening PR")
 
-    short_desc = summary.lower().replace(" ", "-").replace(".", "")[:40]
+    # Collapse any run of non-alphanumeric characters to a single hyphen (not
+    # just spaces/periods) — a ticket title routinely has ':', '/', '(', etc.
+    # (e.g. "Frontend: show live signup count...") which are invalid in a git
+    # ref name and would otherwise break branch creation.
+    short_desc = re.sub(r"[^a-z0-9]+", "-", summary.lower()).strip("-")[:40].strip("-")
     # Unique per run so re-running the same ticket never collides with a branch
     # (and PR) an earlier run already pushed.
     branch_name = f"feat/{resolved_key}-{short_desc}-{uuid.uuid4().hex[:6]}"
 
-    run_cmd(["git", "checkout", "-b", branch_name], repo_dir)
+    rc, _, err = run_cmd(["git", "checkout", "-b", branch_name], repo_dir)
+    if rc != 0:
+        # Fail fast here with the real reason, rather than silently continuing
+        # to commit on whatever branch happens to be checked out and only
+        # discovering the problem at push time ("src refspec ... does not
+        # match any") — which used to be the only symptom of this failing.
+        msg = f"Failed to create branch {branch_name}: {err[:300]}"
+        print(f"  !! {msg}")
+        ticket(TicketAction(command="add_comment", ticket_key=resolved_key, comment_text=msg))
+        on_step("pr", "failed", msg)
+        raise PipelineHalt("failed", msg)
     run_cmd(["git", "add", "-A"], repo_dir)
     rc, _, _ = run_cmd(
         ["git", "commit", "-m", f"{resolved_key}: {summary}\n\nCloses {resolved_key}\n\nCo-authored-by: openhands <openhands@all-hands.dev>"],
@@ -558,7 +607,7 @@ def run_pipeline(
         if head_now.strip() == base_commit:
             msg = "Nothing to commit (already up to date)"
             print(f"  ⚠️  {msg}")
-            on_step("pr", "failed", msg)
+            on_step("pr", "human", msg)
             raise PipelineHalt("human", msg)
         print("  [OK] Agent already committed its changes; nothing further to stage")
 

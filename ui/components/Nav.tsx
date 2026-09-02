@@ -8,6 +8,7 @@ const NAV_ITEMS = [
   { label: 'Home', href: '/', icon: 'home', color: '#6366f1' },
   { label: 'Dashboard', href: '/dashboard', icon: 'grid', color: '#3b82f6' },
   { label: 'Run', href: '/run', icon: 'play', color: '#10b981' },
+  { label: 'Bulk Request', href: '/bulk', icon: 'tickets', color: '#14b8a6' },
   { label: 'Logs', href: '/logs', icon: 'file', color: '#f59e0b' },
   { label: 'Skills', href: '/skills', icon: 'award', color: '#ec4899' },
   { label: 'Config', href: '/config', icon: 'settings', color: '#06b6d4' },
@@ -55,6 +56,13 @@ function NavIcon({ name }: { name: string }) {
         <svg {...common}>
           <circle cx="12" cy="8" r="6" />
           <polyline points="8.21 13.89 7 23 12 20 17 23 15.79 13.88" />
+        </svg>
+      );
+    case 'tickets':
+      return (
+        <svg {...common}>
+          <path d="M9 11l3 3L22 4" />
+          <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
         </svg>
       );
     case 'settings':
