@@ -17,6 +17,8 @@
   --font-mono: "SF Mono", Monaco, "Cascadia Code", "Roboto Mono", Consolas, monospace;
 }
 
+:root { --sidebar-width: 208px; }
+
 /* ── base reset ── */
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -27,6 +29,10 @@ html, body {
   color: var(--color-text);
   -webkit-font-smoothing: antialiased;
 }
+
+/* Fixed sidebar takes no flow space, so push everything else over.
+   The login page opts out via .scene below since it's a full-bleed scene. */
+body { padding-left: var(--sidebar-width); }
 
 /* ── background animation (from dashboard.html) ── */
 .bg-animation { position: fixed; inset: 0; z-index: 0; overflow: hidden; pointer-events: none; }
@@ -64,24 +70,25 @@ html, body {
 
 .content { position: relative; z-index: 1; }
 
-/* ── navbar ── */
-.navbar {
-  height: 64px;
-  background: rgba(255,255,255,.72);
+/* ── sidebar (vertical nav) ── */
+.sidebar {
+  position: fixed;
+  top: 0; left: 0; bottom: 0;
+  width: var(--sidebar-width);
+  background: rgba(255,255,255,.78);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
-  border-bottom: 1px solid var(--color-border);
+  border-right: 1px solid var(--color-border);
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 32px;
-  position: sticky;
-  top: 0;
+  flex-direction: column;
+  padding: 18px 12px;
   z-index: 100;
+  overflow-y: auto;
 }
+.sidebar-brand-link { text-decoration: none; color: inherit; display: block; padding: 0 6px; margin-bottom: 24px; }
 .nav-brand { display: flex; align-items: center; gap: 12px; }
 .brand-icon {
-  width: 36px; height: 36px;
+  width: 36px; height: 36px; flex-shrink: 0;
   background: linear-gradient(135deg, var(--color-accent-purple), var(--color-accent-violet));
   border-radius: 10px;
   display: flex; align-items: center; justify-content: center;
@@ -90,18 +97,45 @@ html, body {
 .brand-icon svg { width: 20px; height: 20px; color: #fff; }
 .brand-name { font-size: 16px; font-weight: 700; line-height: 1.2; }
 .brand-sub { font-size: 10px; color: var(--color-text-muted); text-transform: uppercase; letter-spacing: .8px; }
-.nav-links { display: flex; align-items: center; gap: 4px; }
+
+.sidebar-nav { display: flex; flex-direction: column; gap: 2px; flex: 1; }
 .nav-link {
-  padding: 8px 16px; font-size: 14px; font-weight: 500; color: var(--color-text-secondary);
-  text-decoration: none; border-radius: 8px; transition: all .15s; cursor: pointer;
+  font-size: 14px; font-weight: 500; color: var(--color-text-secondary);
+  text-decoration: none; transition: all .15s; cursor: pointer;
 }
+.sidebar-nav .nav-link {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 8px; border-radius: 10px;
+}
+.nav-link-icon {
+  position: relative;
+  width: 26px; height: 26px; border-radius: 8px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+}
+.nav-link-icon::before {
+  content: '';
+  position: absolute; inset: 0; border-radius: inherit;
+  background: var(--nav-icon-color, var(--color-text-muted));
+  opacity: .14;
+  transition: opacity .15s;
+}
+.nav-link-icon svg { position: relative; width: 14px; height: 14px; color: var(--nav-icon-color, var(--color-text-muted)); }
 .nav-link:hover { color: var(--color-text); background: var(--color-accent-light); }
-.nav-link.active { color: var(--color-accent-purple); background: var(--color-accent-light); font-weight: 600; }
-.nav-right { display: flex; align-items: center; gap: 12px; }
+.nav-link:hover .nav-link-icon::before { opacity: .26; }
+.nav-link.active { color: var(--color-text); background: var(--color-accent-light); font-weight: 600; }
+.nav-link.active .nav-link-icon::before { opacity: .26; }
+
+.sidebar-footer {
+  display: flex; flex-direction: column; gap: 12px;
+  margin-top: 12px; padding-top: 16px; border-top: 1px solid var(--color-border);
+}
+.sidebar-footer-row { display: flex; align-items: center; justify-content: space-between; padding: 0 8px; }
+
 .status-pill {
   display: flex; align-items: center; gap: 8px; padding: 6px 12px;
   background: rgba(16,185,129,.1); border: 1px solid rgba(16,185,129,.22); border-radius: 100px;
   font-size: 12px; font-weight: 600; color: var(--color-green);
+  width: fit-content; margin: 0 8px;
 }
 .status-dot {
   width: 6px; height: 6px; background: var(--color-green); border-radius: 50%;
@@ -109,10 +143,19 @@ html, body {
 }
 @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(16,185,129,.7); } 70% { box-shadow: 0 0 0 7px rgba(16,185,129,0); } 100% { box-shadow: 0 0 0 0 rgba(16,185,129,0); } }
 .user-avatar {
-  width: 32px; height: 32px; border-radius: 50%;
+  width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0;
   background: linear-gradient(135deg, var(--color-accent-purple), var(--color-accent-violet));
   display: flex; align-items: center; justify-content: center;
   color: #fff; font-size: 12px; font-weight: 700;
+}
+
+/* mobile top bar + drawer backdrop — hidden on desktop */
+.mobile-topbar { display: none; }
+.sidebar-backdrop { display: none; }
+.hamburger-btn {
+  width: 34px; height: 34px; border-radius: 8px; border: 1px solid var(--color-border);
+  background: transparent; color: var(--color-text); cursor: pointer; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
 }
 
 /* ── hero ── */
@@ -663,13 +706,20 @@ html.dark {
   --color-accent-light: #1a1a2e;
 }
 html.dark, html.dark body { background: var(--color-bg); color: var(--color-text); }
-html.dark .navbar {
-  background: rgba(17,17,24,.88);
+html.dark .sidebar {
+  background: rgba(17,17,24,.9);
+  border-right-color: var(--color-border);
+}
+html.dark .mobile-topbar {
+  background: rgba(17,17,24,.9);
   border-bottom-color: var(--color-border);
 }
 html.dark .step-visual { background: #0a0a16; }
 html.dark .badge.pending { background: #1a1a2e; }
 html.dark .footer { background: var(--color-surface); border-top-color: var(--color-border); }
+
+/* login page is a full-bleed immersive scene — opt out of the sidebar gutter */
+.scene { margin-left: calc(-1 * var(--sidebar-width)); }
 
 /* ── responsive ── */
 @media (max-width:960px) {
@@ -677,13 +727,37 @@ html.dark .footer { background: var(--color-surface); border-top-color: var(--co
   .pipeline-arrow { transform: rotate(90deg); padding: 6px 0; }
   .hero h1 { font-size: 42px; }
   .features { grid-template-columns: repeat(2,1fr); }
-  .nav-links { display: none; }
-  .hamburger { display: flex !important; }
+
+  body { padding-left: 0; }
+  .scene { margin-left: 0; }
+
+  .sidebar {
+    transform: translateX(-100%);
+    transition: transform .25s ease;
+    box-shadow: 0 0 40px rgba(0,0,0,.18);
+  }
+  .sidebar.open { transform: translateX(0); }
+
+  .mobile-topbar {
+    display: flex; align-items: center; gap: 12px;
+    height: 56px; padding: 0 16px;
+    position: sticky; top: 0;
+    background: rgba(255,255,255,.85);
+    backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+    border-bottom: 1px solid var(--color-border);
+    z-index: 90;
+  }
+  .mobile-topbar .brand-icon { width: 28px; height: 28px; }
+  .mobile-topbar .brand-name { font-size: 14px; }
+
+  .sidebar-backdrop {
+    display: block; position: fixed; inset: 0;
+    background: rgba(0,0,0,.35); z-index: 95;
+  }
 }
 @media (max-width:600px) {
   .hero { padding: 60px 24px 40px; }
   .hero h1 { font-size: 34px; }
   .hero-sub { font-size: 16px; }
   .features { grid-template-columns: 1fr; }
-  .navbar { padding: 0 20px; }
 }

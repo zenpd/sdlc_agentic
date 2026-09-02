@@ -1,3 +1,4 @@
+import html
 import os
 import re
 from collections.abc import Sequence
@@ -16,6 +17,21 @@ from openhands.sdk.logger import get_logger
 
 
 logger = get_logger(__name__)
+
+_BLOCK_BREAK_RE = re.compile(r"</?(?:br|p|div|li|ul|ol|h[1-6])\b[^>]*>", re.IGNORECASE)
+_TAG_RE = re.compile(r"<[^>]+>")
+_BLANKLINES_RE = re.compile(r"\n{3,}")
+
+
+def _html_to_text(raw: str) -> str:
+    """ADO stores System.Description as HTML. Downstream code (the Repo:/Branch:
+    override regex in jira_bot.py, and the LLM prompts) expects plain text with
+    real line breaks — a literal '<br>' left in a "Repo: owner/repo<br>" line
+    gets parsed as part of the repo name, which then breaks git clone."""
+    text = _BLOCK_BREAK_RE.sub("\n", raw)
+    text = _TAG_RE.sub("", text)
+    text = html.unescape(text)
+    return _BLANKLINES_RE.sub("\n\n", text).strip()
 
 
 ENV_VARS = {"ADO_ORG_URL", "ADO_PROJECT", "ADO_PAT"}
@@ -179,7 +195,7 @@ class ADOExecutor(ToolExecutor[ADOAction, ADOObservation]):
             )
 
         fields = item.get("fields", {})
-        desc = fields.get("System.Description", "") or ""
+        desc = _html_to_text(fields.get("System.Description", "") or "")
         return ADOObservation.from_text(
             text=(
                 f"Key: {item['id']}\n"

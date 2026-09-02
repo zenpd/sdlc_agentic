@@ -91,10 +91,10 @@ export default function SkillsPage() {
 
       <Nav />
 
-      <div className="content" style={{ maxWidth: 1200, margin: '0 auto', padding: '84px 32px 48px' }}>
+      <div className="content" style={{ maxWidth: 1200, margin: '0 auto', padding: '40px 32px 48px' }}>
         {editingSlug ? (
           <>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 24, flexWrap: 'wrap' }}>
+            <div className="card-main" style={{ padding: '16px 24px', display: 'flex', alignItems: 'center', gap: 16, marginBottom: 24, flexWrap: 'wrap' }}>
               <button
                 onClick={closeEditor}
                 className="btn-secondary"
@@ -102,7 +102,7 @@ export default function SkillsPage() {
               >
                 ← Back
               </button>
-              <h1 style={{ fontSize: 22, fontWeight: 800, letterSpacing: '-0.01em' }}>
+              <h1 style={{ fontSize: 20, fontWeight: 800, letterSpacing: '-0.01em' }}>
                 {titleCase(editingSlug)}
               </h1>
               <div style={{ flex: 1 }} />
@@ -147,8 +147,8 @@ export default function SkillsPage() {
           </>
         ) : (
           <>
-            <div style={{ marginBottom: 32 }}>
-              <h1 style={{ fontSize: 28, fontWeight: 800, letterSpacing: '-0.01em', marginBottom: 6 }}>
+            <div className="card-main" style={{ padding: '20px 24px', marginBottom: 24 }}>
+              <h1 style={{ fontSize: 24, fontWeight: 800, letterSpacing: '-0.01em', marginBottom: 6 }}>
                 Persona Skills
               </h1>
               <p style={{ fontSize: 14, color: 'var(--color-text-secondary)', maxWidth: 640 }}>

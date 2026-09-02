@@ -77,9 +77,14 @@ export default function DashboardPage() {
 
       <Nav />
 
-      <div className="content" style={{ maxWidth: 1200, margin: '0 auto', padding: '84px 32px 48px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 32, flexWrap: 'wrap' }}>
-          <h1 style={{ fontSize: 28, fontWeight: 800, letterSpacing: '-0.01em' }}>Dashboard</h1>
+      <div className="content" style={{ maxWidth: 1200, margin: '0 auto', padding: '40px 32px 48px' }}>
+        <div className="card-main" style={{ padding: '20px 24px', display: 'flex', alignItems: 'center', gap: 16, marginBottom: 24, flexWrap: 'wrap' }}>
+          <div>
+            <h1 style={{ fontSize: 24, fontWeight: 800, letterSpacing: '-0.01em' }}>Dashboard</h1>
+            <p style={{ fontSize: 13, color: 'var(--color-text-secondary)', marginTop: 4 }}>
+              Overview of pipeline activity and recent runs.
+            </p>
+          </div>
           <div style={{ flex: 1 }} />
           {lastRefreshed && (
             <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>

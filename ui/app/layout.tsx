@@ -3,7 +3,7 @@ import './globals.css';
 
 export const metadata: Metadata = {
   title: 'SDLC Automation',
-  description: 'AI-powered Jira automation',
+  description: 'AI-powered SDLC automation',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
