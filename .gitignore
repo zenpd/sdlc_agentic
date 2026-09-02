@@ -226,3 +226,4 @@ tests/integration/api_compliance/outputs/
 # Next.js frontend
 ui/node_modules/
 ui/.next/
+ui/*.tsbuildinfo
