@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import './globals.css';
+import AuthGate from '@/components/AuthGate';
 
 export const metadata: Metadata = {
   title: 'SDLC Automation',
@@ -17,7 +18,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         />
       </head>
       <body>
-        {children}
+        <AuthGate>{children}</AuthGate>
       </body>
     </html>
   );

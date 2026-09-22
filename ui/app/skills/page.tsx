@@ -91,7 +91,7 @@ export default function SkillsPage() {
 
       <Nav />
 
-      <div className="content" style={{ maxWidth: 1200, margin: '0 auto', padding: '40px 32px 48px' }}>
+      <div className="content" style={{ padding: '40px 32px 48px' }}>
         {editingSlug ? (
           <>
             <div className="card-main" style={{ padding: '16px 24px', display: 'flex', alignItems: 'center', gap: 16, marginBottom: 24, flexWrap: 'wrap' }}>

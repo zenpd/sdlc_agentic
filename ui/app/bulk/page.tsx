@@ -215,7 +215,7 @@ export default function BulkRequestPage() {
 
       <Nav />
 
-      <div className="content" style={{ maxWidth: 1000, margin: '0 auto', padding: '40px 32px 48px' }}>
+      <div className="content" style={{ padding: '40px 32px 48px' }}>
         <div className="card-main" style={{ padding: '20px 24px', marginBottom: 24 }}>
           <h1 style={{ fontSize: 24, fontWeight: 800, letterSpacing: '-0.01em' }}>Bulk Request</h1>
           <p style={{ fontSize: 13, color: 'var(--color-text-secondary)', marginTop: 4 }}>

@@ -1,510 +1,86 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback, FormEvent } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { getGithubUser, GITHUB_LOGIN_PATH } from '@/lib/api';
+
+function GithubIcon({ size = 20 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor">
+      <path d="M12 .3a12 12 0 0 0-3.79 23.4c.6.1.82-.26.82-.58v-2.17c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.84 2.81 1.3 3.5 1 .1-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.12-.3-.54-1.52.12-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.29-1.55 3.3-1.23 3.3-1.23.66 1.66.24 2.88.12 3.18.77.84 1.24 1.91 1.24 3.22 0 4.61-2.81 5.62-5.49 5.92.43.37.81 1.1.81 2.22v3.29c0 .32.22.69.83.58A12 12 0 0 0 12 .3Z" />
+    </svg>
+  );
+}
 
 export default function LoginPage() {
   const router = useRouter();
-  const [isOn, setIsOn] = useState(false);
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [submitted, setSubmitted] = useState(false);
-  const [shake, setShake] = useState(false);
-  const [authError, setAuthError] = useState('');
-  const dustInterval = useRef<ReturnType<typeof setInterval> | null>(null);
-  const sceneRef = useRef<HTMLDivElement>(null);
+  const [checking, setChecking] = useState(true);
 
-  const toggleLamp = useCallback(() => {
-    setIsOn((p) => !p);
-  }, []);
-
-  const pull = useCallback(() => {
-    const chain = document.getElementById('lamp-chain');
-    if (!chain) return;
-    chain.classList.add('pulled');
-    setTimeout(() => chain.classList.remove('pulled'), 700);
-    toggleLamp();
-  }, [toggleLamp]);
-
-  // Dust particles
   useEffect(() => {
-    if (!isOn) {
-      if (dustInterval.current) { clearInterval(dustInterval.current); dustInterval.current = null; }
-      return;
-    }
-    const spawn = () => {
-      const dust = document.createElement('div');
-      dust.className = 'dust';
-      const startX = 22 + Math.random() * 12;
-      const startY = 38 + Math.random() * 8;
-      const driftX = (Math.random() - 0.3) * 6;
-      const driftY = 25 + Math.random() * 20;
-      const duration = 6 + Math.random() * 6;
-      const size = 1.5 + Math.random() * 2;
-      dust.style.cssText = `
-        position: absolute;
-        width: ${size}px;
-        height: ${size}px;
-        background: #fff5e0;
-        border-radius: 50%;
-        pointer-events: none;
-        box-shadow: 0 0 4px rgba(255, 210, 130, 0.8);
-        left: ${startX}%;
-        top: ${startY}%;
-      `;
-      sceneRef.current?.appendChild(dust);
-      const anim = dust.animate(
-        [
-          { transform: 'translate(0, 0)', opacity: 0 },
-          { opacity: 0.9, offset: 0.15 },
-          { opacity: 0.9, offset: 0.7 },
-          { transform: `translate(${driftX}vw, ${driftY}vh)`, opacity: 0 },
-        ],
-        { duration: duration * 1000, easing: 'ease-in-out' }
-      );
-      anim.onfinish = () => dust.remove();
-    };
-    for (let i = 0; i < 25; i++) setTimeout(() => spawn(), i * 80);
-    dustInterval.current = setInterval(spawn, 220);
-    return () => { if (dustInterval.current) { clearInterval(dustInterval.current); dustInterval.current = null; } };
-  }, [isOn]);
-
-  const handleSubmit = (e: FormEvent) => {
-    e.preventDefault();
-    setAuthError('');
-    if (!email || !password) {
-      setShake(true);
-      setTimeout(() => setShake(false), 350);
-      return;
-    }
-    if (email !== 'admin' || password !== 'admin') {
-      setAuthError('Invalid credentials. Use admin / admin.');
-      setShake(true);
-      setTimeout(() => setShake(false), 350);
-      return;
-    }
-    setSubmitted(true);
-    setTimeout(() => {
-      router.push('/');
-    }, 1200);
-  };
+    let cancelled = false;
+    getGithubUser().then((user) => {
+      if (!cancelled && user) router.replace('/');
+      if (!cancelled) setChecking(false);
+    });
+    return () => { cancelled = true; };
+  }, [router]);
 
   return (
-    <div
-      ref={sceneRef}
-      className={`scene ${isOn ? 'on' : ''}`}
-      style={{
-        position: 'relative',
-        width: '100vw',
-        height: '100vh',
-        overflow: 'hidden',
-        background: '#000',
-      }}
-    >
-      {/* Wall */}
-      <div
-        className="wall"
-        style={{
-          position: 'absolute',
-          inset: 0,
-          background: '#000',
-          transition: 'background 1.8s ease',
-        }}
-      />
-      {isOn && (
-        <style>{`
-          .wall {
-            background:
-              radial-gradient(ellipse 50% 80% at 28% 45%, #1a0f06 0%, #0a0604 30%, #000 70%) !important;
-          }
-        `}</style>
-      )}
-      <div
-        className="wall-grain"
-        style={{
-          position: 'absolute',
-          inset: 0,
-          backgroundImage:
-            'repeating-linear-gradient(90deg, rgba(255,180,80,0.015) 0 1px, transparent 1px 3px), repeating-linear-gradient(0deg, rgba(0,0,0,0.2) 0 1px, transparent 1px 4px)',
-          opacity: 0.5,
-          pointerEvents: 'none',
-        }}
-      />
-
-      {/* Glow */}
-      <div
-        className="glow"
-        style={{
-          position: 'absolute',
-          inset: 0,
-          background:
-            'radial-gradient(circle at 28% 42%, rgba(255, 200, 100, 0.32) 0%, rgba(255, 160, 60, 0.16) 18%, rgba(255, 110, 40, 0.05) 40%, transparent 60%)',
-          opacity: isOn ? 1 : 0,
-          transition: 'opacity 1.4s ease 0.1s',
-          pointerEvents: 'none',
-        }}
-      />
-
-      {/* Light cone */}
-      <div
-        style={{
-          position: 'absolute',
-          top: '38%',
-          left: '28%',
-          transform: 'translateX(-50%)',
-          width: 600,
-          height: '70vh',
-          background:
-            'linear-gradient(to bottom, rgba(255, 210, 130, 0.28) 0%, rgba(255, 180, 80, 0.14) 35%, rgba(255, 150, 60, 0.04) 70%, transparent 100%)',
-          clipPath: 'polygon(43% 0%, 57% 0%, 100% 100%, 0% 100%)',
-          opacity: isOn ? 1 : 0,
-          transition: 'opacity 1.4s ease 0.3s',
-          pointerEvents: 'none',
-          filter: 'blur(1px)',
-          mixBlendMode: 'screen',
-        }}
-      />
-
-      {/* Bulb core */}
-      <div
-        style={{
-          position: 'absolute',
-          top: '37%',
-          left: '28%',
-          transform: 'translateX(-50%)',
-          width: 140,
-          height: 140,
-          borderRadius: '50%',
-          background:
-            'radial-gradient(circle, rgba(255, 248, 220, 0.95) 0%, rgba(255, 210, 120, 0.7) 25%, rgba(255, 160, 60, 0.3) 50%, transparent 75%)',
-          opacity: isOn ? 1 : 0,
-          transition: 'opacity 0.5s ease 0.2s',
-          filter: 'blur(3px)',
-          pointerEvents: 'none',
-        }}
-        className={isOn ? 'animate-flicker' : ''}
-      />
-
-      {/* Brand */}
-      <div
-        className="brand"
-        style={{
-          position: 'absolute',
-          top: 30,
-          left: 40,
-          zIndex: 15,
-          transition: 'color 1s',
-        }}
-      >
-        Zensar
+    <div className="auth-page bg-bg" style={{ position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div className="bg-animation">
+        <div className="bg-grid" />
+        <div className="bg-orb bg-orb-1" />
+        <div className="bg-orb bg-orb-2" />
+        <div className="bg-orb bg-orb-3" />
       </div>
 
-      {/* Divider */}
-      <div
-        style={{
-          position: 'absolute',
-          top: '20%',
-          bottom: '20%',
-          left: '56%',
-          width: 1,
-          background:
-            'linear-gradient(to bottom, transparent 0%, rgba(200, 151, 96, 0.15) 30%, rgba(200, 151, 96, 0.15) 70%, transparent 100%)',
-          opacity: isOn ? 1 : 0,
-          transition: 'opacity 1.4s ease 0.8s',
-          zIndex: 10,
-        }}
-      />
-
-      {/* Lamp */}
-      <div
-        style={{
-          position: 'absolute',
-          top: 0,
-          left: '28%',
-          transform: 'translateX(-50%)',
-          width: 280,
-          zIndex: 5,
-        }}
-      >
+      <div style={{ width: '92%', maxWidth: 400, position: 'relative', zIndex: 1 }}>
         <div
+          className="card-main"
           style={{
-            position: 'absolute',
-            top: 0,
-            left: '50%',
-            transform: 'translateX(-50%)',
-            width: 4,
-            height: 160,
-            background:
-              'linear-gradient(to right, #0a0604 0%, #2a1a10 50%, #0a0604 100%)',
-            borderRadius: 2,
-          }}
-        />
-        <svg
-          width="280"
-          height="170"
-          viewBox="0 0 280 170"
-          style={{
-            position: 'absolute',
-            top: 158,
-            left: '50%',
-            transform: 'translateX(-50%)',
-            filter: 'drop-shadow(0 8px 20px rgba(0,0,0,0.9))',
-          }}
-        >
-          <defs>
-            <linearGradient id="brassGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-              <stop offset="0%" stopColor="#3a2515" />
-              <stop offset="25%" stopColor="#8a6535" />
-              <stop offset="50%" stopColor="#d4a574" />
-              <stop offset="75%" stopColor="#8a6535" />
-              <stop offset="100%" stopColor="#3a2515" />
-            </linearGradient>
-            <linearGradient id="shadeGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-              <stop offset="0%" stopColor="#000000" />
-              <stop offset="50%" stopColor="#1a100a" />
-              <stop offset="100%" stopColor="#000000" />
-            </linearGradient>
-            <linearGradient id="shadeInner" x1="0%" y1="0%" x2="0%" y2="100%">
-              <stop offset="0%" stopColor="#000" />
-              <stop offset="100%" stopColor="#0a0604" />
-            </linearGradient>
-            <radialGradient id="bulbLit" cx="50%" cy="50%" r="50%">
-              <stop offset="0%" stopColor="#fff8dc" />
-              <stop offset="40%" stopColor="#ffd27a" />
-              <stop offset="80%" stopColor="#ff9a3c" />
-              <stop offset="100%" stopColor="#8a4a15" />
-            </radialGradient>
-            <radialGradient id="bulbDark" cx="40%" cy="40%" r="60%">
-              <stop offset="0%" stopColor="#2a1a10" />
-              <stop offset="100%" stopColor="#000000" />
-            </radialGradient>
-          </defs>
-
-          {/* Ceiling fixture */}
-          <ellipse cx="140" cy="6" rx="22" ry="4" fill="url(#brassGrad)" />
-          <rect x="118" y="0" width="44" height="8" fill="url(#brassGrad)" />
-
-          {/* Shade */}
-          <path d="M 75 18 L 205 18 L 250 145 L 30 145 Z" fill="url(#shadeGrad)" stroke="#000" strokeWidth="1" />
-          <path d="M 80 22 L 200 22 L 240 142 L 40 142 Z" fill="url(#shadeInner)" />
-          <path d="M 78 18 L 202 18" stroke="rgba(212, 165, 116, 0.4)" strokeWidth="0.5" fill="none" />
-
-          {/* Bottom rim */}
-          <ellipse cx="140" cy="145" rx="110" ry="6" fill="url(#brassGrad)" />
-          <ellipse cx="140" cy="145" rx="110" ry="3" fill="#3a2515" />
-          <ellipse cx="140" cy="143" rx="108" ry="2" fill="rgba(212, 165, 116, 0.5)" />
-
-          {/* Socket */}
-          <rect x="128" y="22" width="24" height="18" fill="#0a0604" stroke="#3a2515" strokeWidth="0.5" />
-          <rect x="130" y="22" width="20" height="3" fill="url(#brassGrad)" />
-
-          {/* Bulb */}
-          <ellipse id="bulb" cx="140" cy="75" rx="16" ry="22" fill={isOn ? 'url(#bulbLit)' : 'url(#bulbDark)'} />
-          <path
-            id="filament"
-            d="M 134 75 Q 137 65 140 75 Q 143 85 146 75"
-            stroke={isOn ? '#fff8dc' : '#3a2515'}
-            strokeWidth="0.8"
-            fill="none"
-            opacity={isOn ? 0.9 : 0.6}
-          />
-          <rect x="134" y="92" width="12" height="6" fill="url(#brassGrad)" />
-          <rect x="135" y="96" width="10" height="2" fill="#3a2515" />
-        </svg>
-
-        {/* Chain */}
-        <div
-          id="lamp-chain"
-          onClick={() => { pull(); }}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pull(); }
-          }}
-          tabIndex={0}
-          role="button"
-          aria-label="Pull lamp chain"
-          style={{
-            position: 'absolute',
-            top: 290,
-            left: '50%',
-            marginLeft: -8,
-            width: 16,
-            height: 140,
-            cursor: 'grab',
-            zIndex: 20,
-            transformOrigin: '8px 0px',
-          }}
-          className="animate-sway"
-        >
-          <svg width="16" height="140" viewBox="0 0 16 140">
-            <defs>
-              <linearGradient id="linkGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-                <stop offset="0%" stopColor="#3a2515" />
-                <stop offset="50%" stopColor="#c89760" />
-                <stop offset="100%" stopColor="#3a2515" />
-              </linearGradient>
-              <radialGradient id="knobGrad" cx="30%" cy="30%" r="70%">
-                <stop offset="0%" stopColor="#f0d4a0" />
-                <stop offset="40%" stopColor="#c89760" />
-                <stop offset="100%" stopColor="#3a2515" />
-              </radialGradient>
-            </defs>
-            <g fill="url(#linkGrad)" stroke="#000" strokeWidth="0.5">
-              {[6, 17, 28, 39, 50, 61, 72, 83, 94].map((cy) => (
-                <ellipse key={cy} cx="8" cy={cy} rx="3.5" ry="4.5" />
-              ))}
-            </g>
-            <circle cx="8" cy="115" r="11" fill="url(#knobGrad)" stroke="#000" strokeWidth="1" />
-            <circle cx="8" cy="115" r="7" fill="none" stroke="#3a2515" strokeWidth="0.8" />
-            <circle cx="4" cy="111" r="2" fill="rgba(255, 240, 200, 0.6)" />
-            <line x1="8" y1="100" x2="8" y2="104" stroke="#3a2515" strokeWidth="1.5" />
-          </svg>
-        </div>
-      </div>
-
-      {/* Hint */}
-      <div
-        style={{
-          position: 'absolute',
-          top: '70%',
-          left: '28%',
-          transform: 'translateX(-50%)',
-          color: 'rgba(255, 210, 122, 0.5)',
-          fontFamily: "'Cormorant Garamond', serif",
-          fontSize: 13,
-          letterSpacing: '0.45em',
-          textTransform: 'uppercase',
-          whiteSpace: 'nowrap',
-          pointerEvents: 'none',
-          zIndex: 15,
-          opacity: isOn ? 0 : undefined,
-          transition: 'opacity 0.6s',
-        }}
-        className={isOn ? '' : 'animate-hintPulse'}
-      >
-        <span style={{ display: 'inline-block', width: 24, height: 1, background: 'rgba(255, 210, 122, 0.3)', verticalAlign: 'middle', margin: '0 14px' }} />
-        Pull the chain
-        <span style={{ display: 'inline-block', width: 24, height: 1, background: 'rgba(255, 210, 122, 0.3)', verticalAlign: 'middle', margin: '0 14px' }} />
-      </div>
-
-      {/* Login form */}
-      <div
-        style={{
-          position: 'absolute',
-          top: '50%',
-          right: '6%',
-          transform: isOn
-            ? 'translateY(-50%) translateX(0)'
-            : 'translateY(-50%) translateX(40px)',
-          width: '92%',
-          maxWidth: 400,
-          opacity: isOn ? 1 : 0,
-          transition: 'opacity 1.2s ease 0.7s, transform 1.2s ease 0.7s',
-          zIndex: 30,
-          pointerEvents: isOn ? 'auto' : 'none',
-        }}
-      >
-        <div
-          style={{
-            background: 'var(--color-surface)',
-            border: '1px solid var(--color-border)',
-            borderRadius: 20,
             padding: '44px 40px 36px',
-            boxShadow: '0 1px 3px rgba(0,0,0,.04), 0 8px 24px rgba(0,0,0,.04), 0 30px 80px rgba(0,0,0,.45)',
-            fontFamily: 'var(--font-sans)',
+            textAlign: 'center',
+            opacity: checking ? 0 : 1,
+            transform: checking ? 'translateY(6px)' : 'translateY(0)',
+            transition: 'opacity .4s ease, transform .4s ease',
           }}
         >
-          {!submitted ? (
-            <>
-              <div
-                style={{
-                  width: 44,
-                  height: 44,
-                  borderRadius: 12,
-                  background: 'linear-gradient(135deg, var(--color-accent-purple), var(--color-accent-violet))',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  margin: '0 auto 20px',
-                  boxShadow: '0 4px 12px rgba(99,102,241,.3)',
-                }}
-              >
-                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                  <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
-                </svg>
-              </div>
-              <h1 style={{ fontSize: 26, fontWeight: 800, textAlign: 'center', letterSpacing: '-0.01em', marginBottom: 4, color: 'var(--color-text)' }}>
-                Welcome back
-              </h1>
-              <p style={{ fontSize: 13, fontWeight: 500, textAlign: 'center', color: 'var(--color-text-secondary)', marginBottom: 28 }}>
-                Sign in to SDLC Automation
-              </p>
+          <div
+            style={{
+              width: 48, height: 48, borderRadius: 12,
+              background: 'linear-gradient(135deg, var(--color-accent-purple), var(--color-accent-violet))',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              margin: '0 auto 20px',
+              boxShadow: '0 4px 12px rgba(99,102,241,.3)',
+            }}
+          >
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+            </svg>
+          </div>
 
-              <form onSubmit={handleSubmit}>
-                <div style={{ marginBottom: 16 }}>
-                  <label className="label-main">Email Address</label>
-                  <input
-                    type="text"
-                    className="input-main"
-                    placeholder="admin"
-                    autoComplete="username"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                  />
-                </div>
+          <h1 style={{ fontSize: 24, fontWeight: 800, letterSpacing: '-0.01em', marginBottom: 6, color: 'var(--color-text)' }}>
+            Welcome to SDLC Automation
+          </h1>
+          <p style={{ fontSize: 13, color: 'var(--color-text-secondary)', marginBottom: 32 }}>
+            Sign in with GitHub to get started — that&apos;s the only step.
+          </p>
 
-                <div style={{ marginBottom: 16 }}>
-                  <label className="label-main">Password</label>
-                  <input
-                    type="password"
-                    className="input-main"
-                    autoComplete="current-password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                  />
-                </div>
+          <a
+            href={GITHUB_LOGIN_PATH}
+            className="btn-primary"
+            style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
+              width: '100%', padding: '13px 20px', fontSize: 14, textDecoration: 'none',
+              background: '#171b21',
+            }}
+          >
+            <GithubIcon size={18} /> Login with GitHub
+          </a>
 
-                {authError && (
-                  <p style={{ color: 'var(--color-red)', fontSize: 12, marginBottom: 16, textAlign: 'center' }}>
-                    {authError}
-                  </p>
-                )}
-
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 22, fontSize: 12 }}>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--color-text-secondary)', cursor: 'pointer' }}>
-                    <input type="checkbox" />
-                    Remember me
-                  </label>
-                  <a href="#" style={{ color: 'var(--color-accent-purple)', textDecoration: 'none', fontWeight: 600 }}>
-                    Forgot?
-                  </a>
-                </div>
-
-                <button
-                  type="submit"
-                  className="btn-primary"
-                  style={{ width: '100%', justifyContent: 'center', ...(shake ? { transform: 'translateX(-8px)' } : {}) }}
-                >
-                  Sign In
-                </button>
-
-                <p style={{ textAlign: 'center', marginTop: 20, fontSize: 12, color: 'var(--color-text-secondary)' }}>
-                  Need access?{' '}
-                  <a href="#" style={{ color: 'var(--color-accent-purple)', textDecoration: 'none', fontWeight: 600 }}>
-                    Contact admin
-                  </a>
-                </p>
-              </form>
-            </>
-          ) : (
-            <div style={{ textAlign: 'center', padding: '48px 0', opacity: 1, transition: 'opacity 1s ease' }}>
-              <h2 style={{ fontSize: 24, fontWeight: 800, color: 'var(--color-text)', letterSpacing: '-0.01em' }}>
-                Welcome to SDLC
-              </h2>
-              <p style={{ fontSize: 12, fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase', color: 'var(--color-accent-purple)', marginTop: 12 }}>
-                Authentication Successful
-              </p>
-            </div>
-          )}
+          <p style={{ fontSize: 11.5, color: 'var(--color-text-muted)', marginTop: 22, lineHeight: 1.5 }}>
+            We only ask for repository access so the agent can work on the projects you choose.
+          </p>
         </div>
       </div>
     </div>

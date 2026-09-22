@@ -1,12 +1,13 @@
 'use client';
 
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
+import { getGithubUser, logoutGithub, type GithubUser } from '@/lib/api';
 
 const NAV_ITEMS = [
-  { label: 'Home', href: '/', icon: 'home', color: '#6366f1' },
-  { label: 'Dashboard', href: '/dashboard', icon: 'grid', color: '#3b82f6' },
+  { label: 'Dashboard', href: '/', icon: 'home', color: '#6366f1' },
+  { label: 'Applications', href: '/applications', icon: 'github', color: '#24292f' },
   { label: 'Run', href: '/run', icon: 'play', color: '#10b981' },
   { label: 'Bulk Request', href: '/bulk', icon: 'tickets', color: '#14b8a6' },
   { label: 'Logs', href: '/logs', icon: 'file', color: '#f59e0b' },
@@ -58,6 +59,12 @@ function NavIcon({ name }: { name: string }) {
           <polyline points="8.21 13.89 7 23 12 20 17 23 15.79 13.88" />
         </svg>
       );
+    case 'github':
+      return (
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M12 .3a12 12 0 0 0-3.79 23.4c.6.1.82-.26.82-.58v-2.17c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.84 2.81 1.3 3.5 1 .1-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.12-.3-.54-1.52.12-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.29-1.55 3.3-1.23 3.3-1.23.66 1.66.24 2.88.12 3.18.77.84 1.24 1.91 1.24 3.22 0 4.61-2.81 5.62-5.49 5.92.43.37.81 1.1.81 2.22v3.29c0 .32.22.69.83.58A12 12 0 0 0 12 .3Z" />
+        </svg>
+      );
     case 'tickets':
       return (
         <svg {...common}>
@@ -103,12 +110,23 @@ function MoonIcon() {
 
 export default function Nav() {
   const pathname = usePathname();
+  const router = useRouter();
   const [dark, setDark] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [githubUser, setGithubUser] = useState<GithubUser | null>(null);
 
   useEffect(() => {
     setDark(document.documentElement.classList.contains('dark'));
   }, []);
+
+  useEffect(() => {
+    getGithubUser().then(setGithubUser);
+  }, []);
+
+  const handleLogout = async () => {
+    await logoutGithub();
+    router.push('/login');
+  };
 
   const toggleDark = () => {
     const next = !dark;
@@ -185,9 +203,18 @@ export default function Nav() {
             Online
           </div>
           <div className="sidebar-footer-row">
-            <Link href="/login" className="user-avatar" style={{ textDecoration: 'none' }}>
-              NB
-            </Link>
+            <button
+              onClick={handleLogout}
+              className="user-avatar"
+              title={githubUser ? `@${githubUser.login} · click to log out` : 'Log out'}
+              style={{
+                textDecoration: 'none', border: 'none', cursor: 'pointer', padding: 0,
+                overflow: 'hidden', backgroundImage: githubUser?.avatar_url ? `url(${githubUser.avatar_url})` : undefined,
+                backgroundSize: 'cover', backgroundPosition: 'center',
+              }}
+            >
+              {!githubUser?.avatar_url && (githubUser?.login?.slice(0, 2).toUpperCase() ?? '··')}
+            </button>
             <button
               onClick={toggleDark}
               aria-label="Toggle dark mode"

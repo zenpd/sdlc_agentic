@@ -274,6 +274,23 @@ def run_pipeline(
 
     lines = result.text.strip().split("\n")
     resolved_key = result.result
+
+    def post_comment(text: str, step_key: str, state: str) -> None:
+        """Post a comment on the ticket. Any failure (bad scope, transient
+        network error, etc.) is printed and pushed into that step's own log
+        instead of being silently discarded — a swallowed failure here used to
+        look identical to "worked fine" from the ticket's side."""
+        obs = ticket(TicketAction(command="add_comment", ticket_key=resolved_key, comment_text=text))
+        if obs.is_error:
+            print(f"  !! Failed to post comment on {resolved_key}: {obs.text}")
+            on_step(step_key, state, f"[WARN] Comment not posted to ticket: {obs.text[:200]}")
+
+    def set_ticket_status(target_status: str, step_key: str, state: str) -> None:
+        obs = ticket(TicketAction(command="update_status", ticket_key=resolved_key, target_status=target_status))
+        if obs.is_error:
+            print(f"  !! Failed to update status on {resolved_key}: {obs.text}")
+            on_step(step_key, state, f"[WARN] Status not updated on ticket: {obs.text[:200]}")
+
     summary = ""
     description = ""
     status_name = ""
@@ -364,8 +381,8 @@ def run_pipeline(
         msg = f"Ticket description is too short ({word_count} words). Please provide more detail including specific packages, versions, and repository to modify."
         print(f"  !! {msg}")
         on_step("gate", "human", msg)
-        ticket(TicketAction(command="add_comment", ticket_key=resolved_key, comment_text=msg))
-        ticket(TicketAction(command="update_status", ticket_key=resolved_key, target_status=STATUS_FAILED))
+        post_comment(msg, "gate", "human")
+        set_ticket_status(STATUS_FAILED, "gate", "human")
         raise PipelineHalt("human", msg)
 
     from openhands.sdk import LLM
@@ -398,13 +415,10 @@ def run_pipeline(
                 gate_text = first.text.strip()
     except Exception as e:
         print(f"  !!! Gate LLM call failed: {e}")
-        ticket(TicketAction(
-            command="add_comment", ticket_key=resolved_key,
-            comment_text="Clarity check failed to run (technical error) — please retry or check the bot logs",
-        ))
-        ticket(TicketAction(command="update_status", ticket_key=resolved_key, target_status=STATUS_FAILED))
         msg = f"Clarity check failed to run (technical error): {e}"
         on_step("gate", "failed", msg)
+        post_comment("Clarity check failed to run (technical error) — please retry or check the bot logs", "gate", "failed")
+        set_ticket_status(STATUS_FAILED, "gate", "failed")
         raise PipelineHalt("failed", msg)
 
     gate_ok = gate_text.strip().upper().startswith("YES")
@@ -412,9 +426,9 @@ def run_pipeline(
     print(f"  → {'[OK] PASS' if gate_ok else '!! FAIL'}")
 
     if not gate_ok:
-        ticket(TicketAction(command="add_comment", ticket_key=resolved_key, comment_text=f"Ticket needs more detail: {gate_text.strip()}"))
-        ticket(TicketAction(command="update_status", ticket_key=resolved_key, target_status=STATUS_FAILED))
         on_step("gate", "human", gate_text.strip()[:200])
+        post_comment(f"Ticket needs more detail: {gate_text.strip()}", "gate", "human")
+        set_ticket_status(STATUS_FAILED, "gate", "human")
         raise PipelineHalt("human", gate_text.strip())
 
     on_step("gate", "success", gate_text.strip()[:200])
@@ -433,8 +447,8 @@ def run_pipeline(
     if rc != 0:
         msg = f"Failed to clone repo: {err[:300]}"
         print(f"!! {msg}")
-        ticket(TicketAction(command="add_comment", ticket_key=resolved_key, comment_text=msg))
         on_step("agent", "failed", msg)
+        post_comment(msg, "agent", "failed")
         raise PipelineHalt("failed", msg)
 
     # Snapshot HEAD so the verify step can detect changes the agent commits
@@ -509,9 +523,9 @@ def run_pipeline(
         print("  [OK] Agent run completed")
     except Exception as e:
         msg = f"Agent run failed: {str(e)[:300]}"
-        ticket(TicketAction(command="add_comment", ticket_key=resolved_key, comment_text=msg))
-        ticket(TicketAction(command="update_status", ticket_key=resolved_key, target_status=STATUS_FAILED))
         on_step("agent", "human", msg)
+        post_comment(msg, "agent", "human")
+        set_ticket_status(STATUS_FAILED, "agent", "human")
         raise PipelineHalt("human", msg)
 
     # ── STEP 4: VERIFY SUCCESS ─────────────────────────────────────
@@ -539,9 +553,9 @@ def run_pipeline(
     if not modified_files:
         msg = "Agent made no changes to the repository."
         print(f"  !! {msg}")
-        ticket(TicketAction(command="add_comment", ticket_key=resolved_key, comment_text=msg))
-        ticket(TicketAction(command="update_status", ticket_key=resolved_key, target_status=STATUS_FAILED))
         on_step("agent", "human", msg)
+        post_comment(msg, "agent", "human")
+        set_ticket_status(STATUS_FAILED, "agent", "human")
         raise PipelineHalt("human", msg)
 
     print(f"  [OK] Modified files: {modified_files}")
@@ -561,9 +575,9 @@ def run_pipeline(
         if failed:
             msg = f"Agent modified requirements.txt but some new packages failed pip validation: {', '.join(failed)}"
             print(f"  !! {msg}")
-            ticket(TicketAction(command="add_comment", ticket_key=resolved_key, comment_text=msg))
-            ticket(TicketAction(command="update_status", ticket_key=resolved_key, target_status=STATUS_FAILED))
             on_step("agent", "human", msg)
+            post_comment(msg, "agent", "human")
+            set_ticket_status(STATUS_FAILED, "agent", "human")
             raise PipelineHalt("human", msg)
 
     print("  [OK] Work verified successfully")
@@ -590,8 +604,8 @@ def run_pipeline(
         # match any") — which used to be the only symptom of this failing.
         msg = f"Failed to create branch {branch_name}: {err[:300]}"
         print(f"  !! {msg}")
-        ticket(TicketAction(command="add_comment", ticket_key=resolved_key, comment_text=msg))
         on_step("pr", "failed", msg)
+        post_comment(msg, "pr", "failed")
         raise PipelineHalt("failed", msg)
     run_cmd(["git", "add", "-A"], repo_dir)
     rc, _, _ = run_cmd(
@@ -608,6 +622,7 @@ def run_pipeline(
             msg = "Nothing to commit (already up to date)"
             print(f"  ⚠️  {msg}")
             on_step("pr", "human", msg)
+            post_comment(msg, "pr", "human")
             raise PipelineHalt("human", msg)
         print("  [OK] Agent already committed its changes; nothing further to stage")
 
@@ -617,8 +632,8 @@ def run_pipeline(
     if rc != 0:
         msg = f"Push failed: {err[:300]}"
         print(f"  !! {msg}")
-        ticket(TicketAction(command="add_comment", ticket_key=resolved_key, comment_text=msg))
         on_step("pr", "failed", msg)
+        post_comment(msg, "pr", "failed")
         raise PipelineHalt("failed", msg)
 
     print(f"  [OK] Pushed branch: {branch_name}")
@@ -649,16 +664,16 @@ def run_pipeline(
     on_step("jira", "in-progress")
     step("8/8  REPORT — Updating ticket")
 
-    comment = (
+    completion_comment = (
         f"Agent completed work on this ticket.\n\n"
         f"**Pull Request**: {pr_url}\n\n"
         f"**Files modified**: {', '.join(modified_files)}\n"
         f"Tests verified: [OK]"
     )
 
-    ticket(TicketAction(command="add_comment", ticket_key=resolved_key, comment_text=comment))
-    ticket(TicketAction(command="update_status", ticket_key=resolved_key, target_status=STATUS_DONE))
     on_step("jira", "success", f"{resolved_key} -> {STATUS_DONE}")
+    post_comment(completion_comment, "jira", "success")
+    set_ticket_status(STATUS_DONE, "jira", "success")
 
     print(f"\n{'=' * 60}")
     print(f"  [OK] DONE — {resolved_key} is now {STATUS_DONE}")

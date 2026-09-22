@@ -145,6 +145,46 @@ export function updateConfig(updates: ConfigUpdate): Promise<IntegrationConfig> 
   });
 }
 
+// ── GitHub OAuth login + repo picker ─────────────────────────────────
+export type GithubUser = {
+  login: string;
+  avatar_url: string | null;
+};
+
+export type GithubRepo = {
+  full_name: string;
+  private: boolean;
+  default_branch: string;
+  updated_at: string | null;
+  description: string | null;
+};
+
+export const GITHUB_LOGIN_PATH = '/api/auth/github/login';
+
+export async function getGithubUser(): Promise<GithubUser | null> {
+  try {
+    return await request<GithubUser>('/api/auth/github/me');
+  } catch {
+    return null;
+  }
+}
+
+export function logoutGithub(): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>('/api/auth/github/logout', { method: 'POST' });
+}
+
+export function getGithubRepos(): Promise<GithubRepo[]> {
+  return request<GithubRepo[]>('/api/github/repos');
+}
+
+export function selectGithubRepo(fullName: string, defaultBranch?: string): Promise<IntegrationConfig> {
+  return request<IntegrationConfig>('/api/github/select-repo', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ full_name: fullName, default_branch: defaultBranch }),
+  });
+}
+
 export function formatDuration(sec: number | null): string {
   if (sec == null) return '—';
   if (sec < 60) return `${sec}s`;

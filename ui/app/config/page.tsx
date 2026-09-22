@@ -139,7 +139,7 @@ export default function ConfigPage() {
 
       <Nav />
 
-      <div className="content" style={{ maxWidth: 900, margin: '0 auto', padding: '40px 32px 48px' }}>
+      <div className="content" style={{ padding: '40px 32px 48px' }}>
         <div className="card-main" style={{ padding: '20px 24px', marginBottom: 24 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 8, flexWrap: 'wrap' }}>
             <h1 style={{ fontSize: 24, fontWeight: 800, letterSpacing: '-0.01em' }}>Integration Config</h1>
