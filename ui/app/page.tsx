@@ -1,217 +1,252 @@
+'use client';
+
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import Nav from '@/components/Nav';
+import StatCard from '@/components/StatCard';
+import StatusBadge from '@/components/StatusBadge';
+import {
+  getStats, getRuns, getConfig, formatDuration, formatTime,
+  type RunStats, type RunRecord, type IntegrationConfig,
+} from '@/lib/api';
 
-export default function HomePage() {
+const ticketLabel = (key: string) => (/^\d+$/.test(key) ? `#${key}` : key);
+
+function parseFetch(run: RunRecord): { summary: string | null; persona: string | null } {
+  const line = run.logs.fetch?.[0] ?? '';
+  const m = line.match(/^\S+:\s*(.*?)\s*\(persona:\s*([\w-]+)\)\s*$/);
+  return m ? { summary: m[1], persona: m[2] } : { summary: null, persona: null };
+}
+
+function previewLines(run: RunRecord | undefined): Array<{ cls: string; text: string }> {
+  if (!run) {
+    return [
+      { cls: 'muted', text: '$ agent run --ticket 674' },
+      { cls: 'ok', text: '✓ clarity gate passed' },
+      { cls: 'ok', text: '✓ persona · backend-engineer' },
+      { cls: 'ok', text: '✓ src/app.py  +20 −0' },
+      { cls: 'run', text: '● opening pull request…' },
+    ];
+  }
+  const state = (key: string) => run.steps.find((s) => s.key === key)?.state;
+  const { persona } = parseFetch(run);
+  const lines: Array<{ cls: string; text: string }> = [{ cls: 'muted', text: `$ agent run --ticket ${run.ticket_key}` }];
+  const gate = state('gate');
+  if (gate === 'success') lines.push({ cls: 'ok', text: '✓ clarity gate passed' });
+  else if (gate === 'human') lines.push({ cls: 'run', text: '⚠ ticket needs more detail — handed to a human' });
+  else if (gate === 'in-progress') lines.push({ cls: 'run', text: '● checking ticket clarity…' });
+  if (persona) lines.push({ cls: 'ok', text: `✓ persona · ${persona}` });
+  const agent = state('agent');
+  if (agent === 'success') lines.push({ cls: 'ok', text: '✓ code change verified' });
+  else if (agent === 'in-progress') lines.push({ cls: 'run', text: '● agent writing code…' });
+  if (run.pr_url) lines.push({ cls: 'ok', text: `✓ PR #${run.pr_url.split('/').pop()} opened` });
+  else if (state('pr') === 'in-progress') lines.push({ cls: 'run', text: '● opening pull request…' });
+  return lines;
+}
+
+function LivePreview({ lines }: { lines: Array<{ cls: string; text: string }> }) {
+  const total = lines.length;
+  const signature = lines.map((l) => l.text).join('|');
+  const [shown, setShown] = useState(1);
+
+  useEffect(() => {
+    let n = 1;
+    setShown(1);
+    // Reveal one line per tick, hold the finished log for a few ticks, then replay.
+    const t = setInterval(() => {
+      n = n >= total + 4 ? 1 : n + 1;
+      setShown(n);
+    }, 750);
+    return () => clearInterval(t);
+  }, [signature, total]);
+
+  const visible = Math.min(shown, total);
+  return (
+    <div className="hero-preview">
+      <div className="preview-top">
+        <span /><span /><span />
+        <div className="preview-live"><i />LIVE</div>
+      </div>
+      <div className="preview-screen">
+        {lines.slice(0, visible).map((l, i) => (
+          <div key={`${i}-${l.text}`} className={`preview-line ${l.cls}`}>
+            {l.text}
+            {i === visible - 1 && <span className="preview-cursor" />}
+          </div>
+        ))}
+      </div>
+      <div className="preview-timeline"><i style={{ width: `${(visible / total) * 100}%` }} /></div>
+    </div>
+  );
+}
+
+export default function DashboardPage() {
+  const [stats, setStats] = useState<RunStats | null>(null);
+  const [runs, setRuns] = useState<RunRecord[]>([]);
+  const [config, setConfig] = useState<IntegrationConfig | null>(null);
+  const [backendUp, setBackendUp] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const [s, r] = await Promise.all([getStats(), getRuns()]);
+        if (cancelled) return;
+        setStats(s); setRuns(r); setBackendUp(true);
+      } catch {
+        if (!cancelled) setBackendUp(false);
+      }
+    };
+    load();
+    getConfig().then((c) => { if (!cancelled) setConfig(c); }).catch(() => {});
+    const t = setInterval(load, 15000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, []);
+
+  const maxDaily = Math.max(1, ...(stats?.daily ?? []).map((d) => d.success + d.failed));
+  const weekTotal = (stats?.daily ?? []).reduce((a, d) => a + d.success + d.failed, 0);
+  const successRate = stats?.success_rate ?? 0;
+  const latest = runs[0];
+  const provider = config?.TICKET_PROVIDER === 'ado' ? 'Azure DevOps' : config?.TICKET_PROVIDER === 'jira' ? 'Jira' : '—';
+  const ticketSecretSet = config?.TICKET_PROVIDER === 'ado' ? config?.ADO_PAT.set : config?.JIRA_API_TOKEN.set;
+  const fullyConfigured = !!(config && config.TARGET_REPO && config.GITHUB_TOKEN.set && config.AZURE_OPENAI_API_KEY.set && ticketSecretSet);
+
   return (
     <div className="bg-bg min-h-screen">
-      <div className="bg-animation">
-        <div className="bg-grid" />
-        <div className="bg-orb bg-orb-1" />
-        <div className="bg-orb bg-orb-2" />
-        <div className="bg-orb bg-orb-3" />
-      </div>
+      <Nav />
 
-      <div className="content">
-        <Nav />
-
-        {/* Hero */}
-        <section className="hero">
-          <div className="hero-badge">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <polyline points="20 6 9 17 4 12" />
-            </svg>
-            Production-ready · <span className="mono">v2.4.1</span>
+      <div className="content page-stack">
+        <section className="hero hero-compact">
+          <div className="hero-copy">
+            <div className="hero-pill">⚡ LIVE &nbsp; Autonomous SDLC agent is ready</div>
+            <h2 className="tagline">From issue to <span className="gradient-word">merge-ready code.</span></h2>
+            <p>
+              Point it at a Jira or Azure DevOps ticket. The agent checks the ticket is clear enough, picks the right
+              persona, writes the change in your repository, and opens a pull request — with every step visible live.
+            </p>
+            <div className="hero-actions">
+              <Link href="/run" className="hero-btn-primary">▷ Launch pipeline</Link>
+              <Link href="/logs" className="hero-btn-secondary">View logs</Link>
+            </div>
           </div>
-          <h1>
-            Autonomous <span className="gradient">SDLC Agent</span>
-          </h1>
-          <div className="hero-sub">
-            Ticket In <span className="arrow-em">→</span> Pull Request Out
-          </div>
-          <p className="hero-desc">
-            An autonomous engineering agent that reads your ticket, writes production code,
-            generates tests, validates CI locally, and opens a review-ready pull request — without human intervention.
-          </p>
-          <div className="hero-cta">
-            <Link href="/run" className="btn-primary">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <polygon points="5 3 19 12 5 21 5 3" />
-              </svg>
-              Launch Pipeline
-            </Link>
-            <Link href="/logs" className="btn-secondary">
-              View Logs
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <line x1="5" y1="12" x2="19" y2="12" />
-                <polyline points="12 5 19 12 12 19" />
-              </svg>
-            </Link>
-          </div>
+          <LivePreview lines={previewLines(latest)} />
         </section>
 
-        {/* 3-step visual explainer */}
-        <section className="pipeline-section">
-          <div className="pipeline-label">How It Works</div>
-          <div className="pipeline">
-            <div className="step-card">
-              <div className="step-header">
-                <div className="step-num">STEP 01</div>
-                <div className="step-icon">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
-                    <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
-                    <line x1="12" y1="22.08" x2="12" y2="12" />
-                  </svg>
-                </div>
+        <section className="metrics">
+          <StatCard
+            label="Total runs" value={stats ? String(stats.total) : '—'} icon="runs"
+            hint={stats && weekTotal === 0 ? 'No runs in the last 7 days' : `${weekTotal} in the last 7 days`}
+          >
+            {weekTotal > 0 && (
+              <div className="mini-bars">
+                {(stats?.daily ?? []).map((d, i) => (
+                  <i key={i} title={`${d.date}: ${d.success + d.failed}`} style={{ height: `${Math.max(12, ((d.success + d.failed) / maxDaily) * 100)}%` }} />
+                ))}
               </div>
-              <div className="step-title">Ticket Ingested</div>
-              <div className="step-desc">Agent reads the ticket, acceptance criteria, and linked design docs.</div>
-              <div className="step-visual">
-                <div className="ticket-id">PROJ-482</div>
-                <div className="ticket-title">Add rate-limit middleware to /api/v2/checkout</div>
-                <div className="ticket-meta">
-                  <span className="ticket-tag tag-priority">HIGH</span>
-                  <span className="ticket-tag tag-status">IN PROGRESS</span>
-                </div>
-              </div>
-            </div>
-
-            <div className="pipeline-arrow">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <line x1="5" y1="12" x2="19" y2="12" />
-                <polyline points="12 5 19 12 12 19" />
-              </svg>
-            </div>
-
-            <div className="step-card">
-              <div className="step-header">
-                <div className="step-num">STEP 02</div>
-                <div className="step-icon">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <polyline points="16 18 22 12 16 6" />
-                    <polyline points="8 6 2 12 8 18" />
-                  </svg>
-                </div>
-              </div>
-              <div className="step-title">Agent Codes &amp; Tests</div>
-              <div className="step-desc">Implements the change, writes unit + integration tests, runs lint and CI locally.</div>
-              <div className="step-visual" style={{ padding: 8 }}>
-                <div className="terminal">
-                  <div className="terminal-line muted">$ agent run --ticket PROJ-482</div>
-                  <div className="terminal-line purple">→ analyzing codebase · 312 files</div>
-                  <div className="terminal-line">→ editing src/middleware/rateLimit.ts</div>
-                  <div className="terminal-line green">✓ 14 tests passed (842ms)</div>
-                  <div className="terminal-line green">
-                    ✓ lint clean · build ok<span className="cursor" />
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="pipeline-arrow">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <line x1="5" y1="12" x2="19" y2="12" />
-                <polyline points="12 5 19 12 12 19" />
-              </svg>
-            </div>
-
-            <div className="step-card">
-              <div className="step-header">
-                <div className="step-num">STEP 03</div>
-                <div className="step-icon">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <circle cx="6" cy="6" r="3" />
-                    <circle cx="6" cy="18" r="3" />
-                    <line x1="6" y1="9" x2="6" y2="15" />
-                    <path d="M18 9v6" />
-                    <circle cx="18" cy="18" r="3" />
-                    <path d="M18 9a3 3 0 0 0 0-6h-6" />
-                  </svg>
-                </div>
-              </div>
-              <div className="step-title">PR Opens</div>
-              <div className="step-desc">A review-ready PR is opened with description, tests, and CI checks green.</div>
-              <div className="step-visual">
-                <div className="pr-header">
-                  <div className="pr-status" />
-                  <div className="pr-id">PR #1284 · open</div>
-                </div>
-                <div className="pr-title">feat: add rate-limit middleware to checkout</div>
-                <div className="pr-files">
-                  <div className="pr-file">
-                    <span className="pr-file-name">src/middleware/rateLimit.ts</span>
-                    <span>
-                      <span className="pr-file-add">+82</span> <span className="pr-file-del">−3</span>
-                    </span>
-                  </div>
-                  <div className="pr-file">
-                    <span className="pr-file-name">__tests__/rateLimit.test.ts</span>
-                    <span>
-                      <span className="pr-file-add">+64</span> <span className="pr-file-del">−0</span>
-                    </span>
-                  </div>
-                </div>
-                <div className="pr-stats">
-                  <span className="pr-stat-add">+146</span>
-                  <span className="pr-stat-del">−3</span>
-                  <span style={{ color: 'var(--color-text-muted)' }}>2 files · CI green</span>
-                </div>
-              </div>
-            </div>
-          </div>
+            )}
+          </StatCard>
+          <StatCard
+            label="Success rate" value={stats ? `${successRate}%` : '—'} tone="teal" icon="gauge"
+            hint={stats ? `${stats.success} of ${stats.total} runs shipped a PR` : 'Runs that opened a PR'}
+          >
+            <div className="gauge"><i style={{ width: `${successRate}%` }} /></div>
+          </StatCard>
+          <StatCard label="Needs human" value={stats ? String(stats.human) : '—'} tone="amber" icon="human" hint="Tickets handed back for clarification" />
+          <StatCard label="Avg. delivery" value={stats ? formatDuration(stats.avg_duration_sec) : '—'} tone="pink" icon="clock" hint="Ticket → pull request" />
         </section>
 
-        {/* Features strip */}
-        <section className="features">
-          <div className="feature">
+        <section className="feature-strip">
+          <Link href="/run" className="feature-card featured">
+            <div className="spark" />
             <div className="feature-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-              </svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><polygon points="6 4 20 12 6 20 6 4" /></svg>
             </div>
-            <h3>Secure by Design</h3>
-            <p>Sandboxed execution. No secrets in model context. SOC 2 aligned.</p>
-          </div>
-          <div className="feature">
+            <h3>Run a ticket</h3>
+            <p>Trigger the full pipeline for one ticket and watch the agent work live, down to the line.</p>
+            <span className="feature-arrow">→</span>
+          </Link>
+          <Link href="/bulk" className="feature-card">
             <div className="feature-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
-              </svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="5" height="16" rx="1" /><rect x="10" y="4" width="5" height="16" rx="1" /><path d="m17 5 4 14" /></svg>
             </div>
-            <h3>Test-First</h3>
-            <p>Every PR ships with passing unit and integration tests, or it doesn&apos;t ship.</p>
-          </div>
-          <div className="feature">
+            <h3>Bulk request</h3>
+            <p>Queue many tickets and run them all in parallel, each in its own isolated workspace.</p>
+            <span className="feature-arrow">→</span>
+          </Link>
+          <Link href="/skills" className="feature-card">
             <div className="feature-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="12" cy="12" r="10" />
-                <polyline points="12 6 12 12 16 14" />
-              </svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="8" r="6" /><polyline points="8.21 13.89 7 23 12 20 17 23 15.79 13.88" /></svg>
             </div>
-            <h3>~4 min Median</h3>
-            <p>From ticket ingestion to opened PR, median cycle time under four minutes.</p>
-          </div>
-          <div className="feature">
-            <div className="feature-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-              </svg>
-            </div>
-            <h3>Human in Loop</h3>
-            <p>Code review still required. The agent prepares, your team approves.</p>
-          </div>
+            <h3>Persona skills</h3>
+            <p>Tune how the backend, frontend, QA, security, and architect personas approach a ticket.</p>
+            <span className="feature-arrow">→</span>
+          </Link>
         </section>
 
-        {/* Footer */}
-        <footer className="footer">
-          <div>© 2026 SDLC Agent · Autonomous Engineering Pipeline</div>
-          <div className="footer-links">
-            <a href="#">Docs</a>
-            <a href="#">Status</a>
-            <a href="#">Security</a>
-            <a href="#">Changelog</a>
-          </div>
-        </footer>
+        <section className="lower-grid">
+          <article className="card-main panel">
+            <div className="panel-head">
+              <h3>Recent runs</h3>
+              <Link href="/logs" className="link-btn">View all →</Link>
+            </div>
+            {runs.length === 0 ? (
+              <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
+                {backendUp === false ? 'Pipeline server is unreachable.' : 'No runs yet — launch your first pipeline.'}
+              </div>
+            ) : (
+              runs.slice(0, 5).map((run) => {
+                const { summary, persona } = parseFetch(run);
+                return (
+                  <Link key={run.id} href={`/logs?run=${run.id}`} className="row-item">
+                    <div className="row-thumb">
+                      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
+                    </div>
+                    <div style={{ minWidth: 0 }}>
+                      <b style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {ticketLabel(run.ticket_key)}{summary ? ` · ${summary}` : ''}
+                      </b>
+                      <span className="meta">
+                        {persona ? `${persona} · ` : ''}{formatTime(run.started_at)} · {formatDuration(run.duration_sec)}
+                      </span>
+                    </div>
+                    <StatusBadge status={run.status} />
+                  </Link>
+                );
+              })
+            )}
+          </article>
+
+          <aside className="card-main panel health-card">
+            <div className="panel-head">
+              <h3>Pipeline health</h3>
+              <Link href="/config" className="link-btn">Configure</Link>
+            </div>
+            <div className={`tip-box${backendUp === false || (config && !fullyConfigured) ? ' warn' : ''}`}>
+              <b>
+                {backendUp === false
+                  ? 'Pipeline server is unreachable'
+                  : config && !fullyConfigured
+                    ? 'Some integrations need attention'
+                    : 'Everything is running smoothly'}
+              </b>
+              <p>
+                {backendUp === false
+                  ? 'Start the backend service to run tickets.'
+                  : config && !fullyConfigured
+                    ? 'Finish connecting your ticket provider, repository, or model in Config.'
+                    : 'Ticket provider, repository, and model are connected and ready.'}
+              </p>
+            </div>
+            <div style={{ marginTop: 14 }}>
+              <div className="kv-row"><span>Ticket provider</span><b>{provider}</b></div>
+              <div className="kv-row"><span>Repository</span><b title={config?.TARGET_REPO}>{config?.TARGET_REPO || '—'}</b></div>
+              <div className="kv-row"><span>Branch</span><b>{config?.TARGET_BRANCH || '—'}</b></div>
+              <div className="kv-row"><span>Model</span><b>{config?.AZURE_OPENAI_DEPLOYMENT || '—'}</b></div>
+            </div>
+            <div className="progress-label"><span>Success rate</span><b>{stats ? `${successRate}%` : '—'}</b></div>
+            <div className="progress-track"><i style={{ width: `${successRate}%` }} /></div>
+          </aside>
+        </section>
       </div>
     </div>
   );

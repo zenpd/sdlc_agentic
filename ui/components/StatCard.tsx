@@ -1,56 +1,51 @@
+import type { ReactNode } from 'react';
+
+type Tone = 'blue' | 'teal' | 'pink' | 'green' | 'amber' | 'red';
+
+const ICONS: Record<string, ReactNode> = {
+  runs: <path d="M4 19V9M10 19V5M16 19v-7M22 19V3" />,
+  check: <polyline points="20 6 9 17 4 12" />,
+  x: <><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></>,
+  human: <><circle cx="12" cy="7" r="4" /><path d="M5.5 21a6.5 6.5 0 0 1 13 0" /></>,
+  clock: <><circle cx="12" cy="12" r="9" /><polyline points="12 7 12 12 15 14" /></>,
+  gauge: <><path d="M12 14l4-4" /><path d="M3.3 17a9 9 0 1 1 17.4 0" /></>,
+};
+
 export default function StatCard({
-  label,
-  value,
-  accent,
-  trend,
+  label, value, tone = 'blue', icon = 'runs', hint, trend, children,
 }: {
   label: string;
   value: string;
+  tone?: Tone;
+  icon?: keyof typeof ICONS | string;
+  hint?: ReactNode;
   accent?: string;
-  trend?: { value: number; direction: 'up' | 'down' };
+  trend?: { value: number; direction: 'up' | 'down'; good?: boolean };
+  children?: ReactNode;
 }) {
+  const good = trend ? (trend.good ?? trend.direction === 'up') : true;
   return (
-    <div
-      style={{
-        background: 'var(--color-surface)',
-        border: '1px solid var(--color-border)',
-        borderRadius: 14,
-        padding: '20px 24px',
-        boxShadow: '0 1px 3px rgba(0,0,0,.04), 0 8px 24px rgba(0,0,0,.04)',
-      }}
-    >
-      <div
-        style={{
-          fontSize: 12,
-          fontWeight: 600,
-          color: 'var(--color-text-muted)',
-          textTransform: 'uppercase',
-          letterSpacing: '0.6px',
-          marginBottom: 6,
-        }}
-      >
+    <article className="metric">
+      <div className="metric-top">
+        <span className={`metric-icon ${tone === 'blue' ? '' : tone}`}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+            {ICONS[icon] ?? ICONS.runs}
+          </svg>
+        </span>
         {label}
       </div>
-      <div
-        style={{
-          fontSize: 30,
-          fontWeight: 800,
-          color: accent ?? 'var(--color-text)',
-          fontFamily: 'var(--font-mono)',
-          lineHeight: 1.1,
-          marginBottom: trend ? 8 : 0,
-        }}
-      >
-        {value}
-      </div>
-      {trend && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, fontWeight: 600 }}>
-          <span style={{ color: trend.direction === 'up' ? 'var(--color-green)' : 'var(--color-red)' }}>
-            {trend.direction === 'up' ? '↑' : '↓'} {Math.abs(trend.value)}%
-          </span>
-          <span style={{ color: 'var(--color-text-muted)', fontWeight: 400 }}>vs prev 3d</span>
-        </div>
-      )}
-    </div>
+      <strong>{value}</strong>
+      {trend ? (
+        <small>
+          <em className={good ? 'trend-up' : 'trend-down'}>
+            {trend.direction === 'up' ? '↗' : '↘'} {Math.abs(trend.value)}%
+          </em>{' '}
+          vs previous 3 days
+        </small>
+      ) : hint ? (
+        <small>{hint}</small>
+      ) : null}
+      {children}
+    </article>
   );
 }

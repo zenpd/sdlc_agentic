@@ -24,11 +24,13 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
 
   if (authed !== true) {
     return (
-      <div style={{
-        minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center',
-        background: 'var(--color-bg)', marginLeft: 'calc(-1 * var(--sidebar-width))',
-      }}>
-        <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Loading…</div>
+      <div className="auth-page" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--color-bg)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 13, color: 'var(--color-text-muted)' }}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ animation: 'spin 1s linear infinite' }}>
+            <path d="M21 12a9 9 0 1 1-6.219-8.56" strokeLinecap="round" />
+          </svg>
+          Loading…
+        </div>
       </div>
     );
   }

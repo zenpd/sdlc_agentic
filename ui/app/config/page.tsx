@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import Nav from '@/components/Nav';
+import PageHeader from '@/components/PageHeader';
 import { getConfig, updateConfig, type IntegrationConfig, type ConfigUpdate } from '@/lib/api';
 
 type FieldProps = {
@@ -49,8 +50,8 @@ function SecretField({
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="card-main" style={{ padding: 24, marginBottom: 20 }}>
-      <h2 style={{ fontSize: 16, fontWeight: 700, marginBottom: 18 }}>{title}</h2>
+    <div className="card-main" style={{ padding: 22, marginBottom: 18 }}>
+      <div className="panel-head"><h3>{title}</h3></div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 16 }}>
         {children}
       </div>
@@ -130,46 +131,29 @@ export default function ConfigPage() {
 
   return (
     <div className="bg-bg min-h-screen">
-      <div className="bg-animation">
-        <div className="bg-grid" />
-        <div className="bg-orb bg-orb-1" />
-        <div className="bg-orb bg-orb-2" />
-        <div className="bg-orb bg-orb-3" />
-      </div>
-
       <Nav />
 
-      <div className="content" style={{ padding: '40px 32px 48px' }}>
-        <div className="card-main" style={{ padding: '20px 24px', marginBottom: 24 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 8, flexWrap: 'wrap' }}>
-            <h1 style={{ fontSize: 24, fontWeight: 800, letterSpacing: '-0.01em' }}>Integration Config</h1>
-            <div style={{ flex: 1 }} />
-            {saved && <span style={{ fontSize: 13, color: 'var(--color-green)' }}>✓ Saved</span>}
-            <button
-              onClick={handleSave}
-              disabled={saving || loading}
-              className="btn-primary"
-              style={{ padding: '10px 20px', fontSize: 13, opacity: saving || loading ? 0.5 : 1 }}
-            >
-              {saving ? 'Saving…' : 'Save changes'}
-            </button>
-          </div>
-          <p style={{ fontSize: 13, color: 'var(--color-text-secondary)', maxWidth: 620 }}>
-            Writes straight to the backend&apos;s .env file — never leaves this
-            machine. Token/key fields never round-trip back to the browser; leave
-            one blank to keep its current value. Most settings apply on the very
-            next pipeline run, no restart needed.
-          </p>
-        </div>
+      <div className="content">
+        <PageHeader
+          eyebrow="Integrations"
+          title="Integration Config"
+          description="Writes straight to the backend's .env file — never leaves this machine. Token/key fields never round-trip back to the browser; leave one blank to keep its current value. Most settings apply on the very next pipeline run."
+          actions={
+            <>
+              {saved && <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--color-green)' }}>✓ Saved</span>}
+              <button
+                onClick={handleSave}
+                disabled={saving || loading}
+                className="btn-primary"
+                style={{ opacity: saving || loading ? 0.5 : 1 }}
+              >
+                {saving ? 'Saving…' : 'Save changes'}
+              </button>
+            </>
+          }
+        />
 
-        {error && (
-          <div style={{
-            marginBottom: 20, padding: '12px 16px', borderRadius: 10,
-            background: 'rgba(220,38,38,.08)', color: 'var(--color-red)', fontSize: 13,
-          }}>
-            {error}
-          </div>
-        )}
+        {error && <div className="alert error">{error}</div>}
 
         {loading ? (
           <div style={{ color: 'var(--color-text-muted)', fontSize: 14 }}>Loading...</div>

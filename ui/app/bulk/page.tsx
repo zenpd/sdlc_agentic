@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import Nav from '@/components/Nav';
+import PageHeader from '@/components/PageHeader';
 import StatusBadge from '@/components/StatusBadge';
 import { getRuns, runTicket, formatDuration, formatTime, type RunRecord } from '@/lib/api';
 
@@ -206,24 +207,16 @@ export default function BulkRequestPage() {
 
   return (
     <div className="bg-bg min-h-screen">
-      <div className="bg-animation">
-        <div className="bg-grid" />
-        <div className="bg-orb bg-orb-1" />
-        <div className="bg-orb bg-orb-2" />
-        <div className="bg-orb bg-orb-3" />
-      </div>
-
       <Nav />
 
-      <div className="content" style={{ padding: '40px 32px 48px' }}>
-        <div className="card-main" style={{ padding: '20px 24px', marginBottom: 24 }}>
-          <h1 style={{ fontSize: 24, fontWeight: 800, letterSpacing: '-0.01em' }}>Bulk Request</h1>
-          <p style={{ fontSize: 13, color: 'var(--color-text-secondary)', marginTop: 4 }}>
-            Add any number of ticket IDs and run them all at once, in parallel — not one at a time.
-          </p>
-        </div>
+      <div className="content">
+        <PageHeader
+          eyebrow="Parallel execution"
+          title="Bulk Request"
+          description="Add any number of ticket IDs and run them all at once, in parallel — not one at a time."
+        />
 
-        <div className="card-main" style={{ padding: '16px 20px', marginBottom: 24 }}>
+        <div className="card-main" style={{ padding: '18px 20px', marginBottom: 20 }}>
           <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
             <input
               className="input-main"
@@ -258,11 +251,7 @@ export default function BulkRequestPage() {
           )}
         </div>
 
-        {error && (
-          <div style={{ marginBottom: 20, padding: '12px 16px', borderRadius: 10, background: 'rgba(220,38,38,.08)', color: 'var(--color-red)', fontSize: 13 }}>
-            {error}
-          </div>
-        )}
+        {error && <div className="alert error">{error}</div>}
 
         {loading ? (
           <div style={{ color: 'var(--color-text-muted)', fontSize: 14 }}>Loading...</div>
@@ -271,7 +260,7 @@ export default function BulkRequestPage() {
             No tickets added yet — enter one or more ticket IDs above to get started.
           </div>
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: 14 }}>
             {ticketIds.map((id) => (
               <TicketCard
                 key={id}

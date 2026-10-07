@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import Nav from '@/components/Nav';
+import PageHeader from '@/components/PageHeader';
 import StepTracker from '@/components/StepTracker';
 import StatusBadge from '@/components/StatusBadge';
 import AgentActivity from '@/components/AgentActivity';
@@ -140,25 +141,17 @@ export default function RunPage() {
 
   return (
     <div className="bg-bg min-h-screen">
-      <div className="bg-animation">
-        <div className="bg-grid" />
-        <div className="bg-orb bg-orb-1" />
-        <div className="bg-orb bg-orb-2" />
-        <div className="bg-orb bg-orb-3" />
-      </div>
-
       <Nav />
 
-      <div className="content" style={{ padding: '40px 32px 48px' }}>
-        <div className="card-main" style={{ padding: '20px 24px', marginBottom: 24 }}>
-          <h1 style={{ fontSize: 24, fontWeight: 800, letterSpacing: '-0.01em' }}>Run Pipeline</h1>
-          <p style={{ fontSize: 13, color: 'var(--color-text-secondary)', marginTop: 4 }}>
-            Trigger a pipeline run for a specific ticket or work item.
-          </p>
-        </div>
+      <div className="content">
+        <PageHeader
+          eyebrow="Pipeline"
+          title="Run Pipeline"
+          description="Trigger a pipeline run for a specific ticket or work item, and watch the agent work live."
+        />
 
         {/* Input */}
-        <div className="card-main" style={{ padding: 28, marginBottom: 24 }}>
+        <div className="card-main" style={{ padding: 24, marginBottom: 20 }}>
           <div style={{ display: 'flex', alignItems: 'flex-end', gap: 16 }}>
             <div style={{ flex: 1 }}>
               <label className="label-main">Ticket ID</label>

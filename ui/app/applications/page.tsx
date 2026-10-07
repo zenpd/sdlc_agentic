@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Nav from '@/components/Nav';
+import PageHeader from '@/components/PageHeader';
 import {
   getGithubUser, logoutGithub, getGithubRepos, selectGithubRepo,
   getConfig, GITHUB_LOGIN_PATH, type GithubUser, type GithubRepo,
@@ -96,12 +97,18 @@ export default function ApplicationsPage() {
         setRepos(await getGithubRepos());
         setError(null);
       } catch (e: any) {
+        // The backend drops the session when GitHub rejects its token, so a
+        // 401 here means "log in again", not an error to show under "Connected as".
+        if (String(e.message).startsWith('401')) {
+          router.replace('/login');
+          return;
+        }
         setError(e.message);
       } finally {
         setLoadingRepos(false);
       }
     }
-  }, []);
+  }, [router]);
 
   useEffect(() => { refresh(); }, [refresh]);
 
@@ -133,28 +140,16 @@ export default function ApplicationsPage() {
 
   return (
     <div className="bg-bg min-h-screen">
-      <div className="bg-animation">
-        <div className="bg-grid" />
-        <div className="bg-orb bg-orb-1" />
-        <div className="bg-orb bg-orb-2" />
-        <div className="bg-orb bg-orb-3" />
-      </div>
-
       <Nav />
 
-      <div className="content" style={{ padding: '40px 32px 48px' }}>
-        <div className="card-main" style={{ padding: '20px 24px', marginBottom: 24 }}>
-          <h1 style={{ fontSize: 24, fontWeight: 800, letterSpacing: '-0.01em' }}>Applications</h1>
-          <p style={{ fontSize: 13, color: 'var(--color-text-secondary)', marginTop: 4 }}>
-            Connect your GitHub account and pick which repository the agent should work on — no manual token or repo name needed.
-          </p>
-        </div>
+      <div className="content">
+        <PageHeader
+          eyebrow="Source control"
+          title="Applications"
+          description="Pick which GitHub repository the agent should work on — no manual token or repo name needed."
+        />
 
-        {error && (
-          <div style={{ marginBottom: 20, padding: '12px 16px', borderRadius: 10, background: 'rgba(220,38,38,.08)', color: 'var(--color-red)', fontSize: 13 }}>
-            {error}
-          </div>
-        )}
+        {error && <div className="alert error">{error}</div>}
 
         {user === undefined ? (
           <div style={{ color: 'var(--color-text-muted)', fontSize: 14 }}>Loading...</div>
@@ -181,7 +176,7 @@ export default function ApplicationsPage() {
           </div>
         ) : (
           <>
-            <div className="card-main" style={{ padding: '16px 20px', marginBottom: 24, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <div className="card-main" style={{ padding: '14px 18px', marginBottom: 20, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
               {user.avatar_url && (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img src={user.avatar_url} alt={user.login} width={32} height={32} style={{ borderRadius: '50%' }} />
