@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import './globals.css';
 import AuthGate from '@/components/AuthGate';
+import { AppProvider } from '@/components/AppContext';
 
 export const metadata: Metadata = {
   title: 'Agent SDLC',
@@ -15,7 +16,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <script dangerouslySetInnerHTML={{ __html: `(function(){var t=localStorage.getItem('theme');if(t==='dark'||(t==null&&window.matchMedia('(prefers-color-scheme:dark)').matches)){document.documentElement.classList.add('dark')}})()` }} />
       </head>
       <body>
-        <AuthGate>{children}</AuthGate>
+        <AuthGate><AppProvider>{children}</AppProvider></AuthGate>
       </body>
     </html>
   );

@@ -4,6 +4,8 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -23,75 +25,144 @@ from backend import skills_store
 load_dotenv()
 
 # ── Config ──────────────────────────────────────────────────────────
-# Every setting below is re-derived by _reload_config() rather than computed
-# once — called at import time (so these names exist immediately) and again
-# as the first thing run_pipeline() does on every call, so a config change
-# written via PUT /api/config (backend/config_store.py, which calls
-# load_dotenv(override=True)) takes effect on the very next run with no
-# process restart needed.
-TICKET_PROVIDER: str
-TicketExecutor: type
-TicketAction: type
-JIRA_JQL: str
-ADO_WIQL: str
-TICKET_QUERY: str
-DEFAULT_TARGET_REPO: str
-DEFAULT_TARGET_BRANCH: str
-GITHUB_TOKEN: Optional[str]
-AZURE_MODEL: str
-AZURE_KEY: Optional[str]
-AZURE_URL: Optional[str]
-STATUS_FAILED: str
-STATUS_DONE: str
-STATUS_IN_PROGRESS: str
+# Everything a run needs to know about *which* application it's working for
+# lives in one immutable PipelineConfig, built per run and passed into
+# run_pipeline(). Nothing here is module-level state, so two applications'
+# pipelines can run at the same time (bulk runs, parallel API calls) without
+# one silently picking up the other's provider, repo, token, or status names.
+#
+# api_server.py builds it from the onboarded application (apps_store), where
+# any field the app leaves blank falls back to the server-wide .env.
+# PipelineConfig.from_env() keeps the CLI entry point (`python -m
+# backend.jira_bot`) working off .env alone.
+_DEFAULT_JQL = 'labels = "Agent-ready" AND status = "Ready for Agent"'
+_DEFAULT_REPO = "nikhilbajaj12/Lighthouse-Pharos"
+
+# Settings key -> PipelineConfig attribute, for the missing-settings check.
+_REQUIRED_COMMON = {
+    "AZURE_OPENAI_API_KEY": "azure_key",
+    "AZURE_OPENAI_ENDPOINT": "azure_url",
+    "AZURE_OPENAI_DEPLOYMENT": "azure_deployment",
+    "GITHUB_TOKEN": "github_token",
+}
+_REQUIRED_ADO = {"ADO_ORG_URL": "ado_org_url", "ADO_PROJECT": "ado_project", "ADO_PAT": "ado_pat"}
+_REQUIRED_JIRA = {"JIRA_BASE_URL": "jira_base_url", "JIRA_USER_EMAIL": "jira_user_email", "JIRA_API_TOKEN": "jira_api_token"}
 
 
-def _reload_config() -> None:
-    """(Re)derive every config global from the current environment."""
-    global TICKET_PROVIDER, TicketExecutor, TicketAction
-    global JIRA_JQL, ADO_WIQL, TICKET_QUERY
-    global DEFAULT_TARGET_REPO, DEFAULT_TARGET_BRANCH, GITHUB_TOKEN
-    global AZURE_MODEL, AZURE_KEY, AZURE_URL
-    global STATUS_FAILED, STATUS_DONE, STATUS_IN_PROGRESS
+@dataclass(frozen=True)
+class PipelineConfig:
+    ticket_provider: str = "jira"
+    jira_base_url: str = ""
+    jira_user_email: str = ""
+    jira_api_token: str = ""
+    jira_jql: str = _DEFAULT_JQL
+    ado_org_url: str = ""
+    ado_project: str = ""
+    ado_pat: str = ""
+    ado_assignee: str = ""
+    ado_wiql: str = ""  # empty -> ado_tool.DEFAULT_WIQL (tag-based)
+    target_repo: str = _DEFAULT_REPO
+    target_branch: str = "dev"
+    github_token: str = ""
+    azure_deployment: str = ""
+    azure_key: str = ""
+    azure_url: str = ""
+    status_failed: str = ""
+    status_done: str = ""
+    status_in_progress: str = ""
+    # Per-application defaults
+    default_persona: str = ""  # "" -> keyword-based persona selection
+    branch_prefix: str = "feat/"
+    gate_min_words: int = 5
+    app_id: str = "default"
+    app_name: str = "Default application"
 
-    # Which ticket tracker to pull from — "jira" (default) or "ado" (Azure DevOps Boards).
-    TICKET_PROVIDER = os.getenv("TICKET_PROVIDER", "jira").strip().lower()
-    if TICKET_PROVIDER not in ("jira", "ado"):
-        raise RuntimeError(f"TICKET_PROVIDER must be 'jira' or 'ado', got: {TICKET_PROVIDER!r}")
+    @classmethod
+    def from_settings(cls, settings: Mapping[str, Optional[str]], app_id: str = "default", app_name: str = "") -> "PipelineConfig":
+        """Build from a flat KEY -> value mapping (an app's resolved settings,
+        or os.environ). Blank values get the same defaults the old env-based
+        config used."""
+        def get(key: str, default: str = "") -> str:
+            return (settings.get(key) or "").strip() or default
 
-    # TicketExecutor/TicketAction alias to whichever provider is active — every call site
-    # below stays provider-agnostic since JiraAction and ADOAction share the same field names.
-    if TICKET_PROVIDER == "ado":
-        TicketExecutor = ADOExecutor
-        TicketAction = ADOAction
-    else:
-        TicketExecutor = JiraExecutor
-        TicketAction = JiraAction
+        provider = get("TICKET_PROVIDER", "jira").lower()
+        if provider not in ("jira", "ado"):
+            raise ValueError(f"TICKET_PROVIDER must be 'jira' or 'ado', got: {provider!r}")
 
-    JIRA_JQL = os.getenv("JIRA_JQL", 'labels = "Agent-ready" AND status = "Ready for Agent"')
-    ADO_WIQL = os.getenv("ADO_WIQL", "")  # empty -> ado_tool.DEFAULT_WIQL (tag-based)
-    TICKET_QUERY = ADO_WIQL if TICKET_PROVIDER == "ado" else JIRA_JQL
-    # Fallbacks only — callers (the /run page, the API) normally pass target_repo/target_branch
-    # per run so this bot isn't locked to a single hardcoded repo.
-    DEFAULT_TARGET_REPO = os.getenv("TARGET_REPO", "nikhilbajaj12/Lighthouse-Pharos")
-    DEFAULT_TARGET_BRANCH = os.getenv("TARGET_BRANCH", "dev")
-    GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-    AZURE_MODEL = f"azure/{os.getenv('AZURE_OPENAI_DEPLOYMENT', 'gpt-4.1-mini')}"
-    AZURE_KEY = os.getenv("AZURE_OPENAI_API_KEY")
-    AZURE_URL = os.getenv("AZURE_OPENAI_ENDPOINT")
-    # Status/state names — defaults match a stock Jira workflow or a stock ADO "Task" work
-    # item type; override via env if your process template uses different names.
-    if TICKET_PROVIDER == "ado":
-        STATUS_FAILED = os.getenv("STATUS_FAILED", "New")
-        STATUS_DONE = os.getenv("STATUS_DONE", "Closed")
-        STATUS_IN_PROGRESS = os.getenv("STATUS_IN_PROGRESS", "Active")
-    else:
-        STATUS_FAILED = os.getenv("STATUS_FAILED", "Human In Loop")
-        STATUS_DONE = os.getenv("STATUS_DONE", "Done")
-        STATUS_IN_PROGRESS = os.getenv("STATUS_IN_PROGRESS", "In Progress")
+        # Status/state names — defaults match a stock Jira workflow or a stock
+        # ADO "Task" work item type; override per app if a process template differs.
+        failed, done, in_progress = ("New", "Closed", "Active") if provider == "ado" else ("Human In Loop", "Done", "In Progress")
 
+        prefix = re.sub(r"[^A-Za-z0-9._/-]+", "-", get("BRANCH_PREFIX", "feat/")).lstrip("/-")
+        if prefix and not prefix.endswith(("/", "-")):
+            prefix += "/"
 
-_reload_config()
+        gate_raw = get("GATE_MIN_WORDS", "5")
+
+        return cls(
+            ticket_provider=provider,
+            jira_base_url=get("JIRA_BASE_URL"),
+            jira_user_email=get("JIRA_USER_EMAIL"),
+            jira_api_token=get("JIRA_API_TOKEN"),
+            jira_jql=get("JIRA_JQL", _DEFAULT_JQL),
+            ado_org_url=get("ADO_ORG_URL"),
+            ado_project=get("ADO_PROJECT"),
+            ado_pat=get("ADO_PAT"),
+            ado_assignee=get("ADO_ASSIGNEE"),
+            ado_wiql=get("ADO_WIQL"),
+            target_repo=get("TARGET_REPO", _DEFAULT_REPO),
+            target_branch=get("TARGET_BRANCH", "dev"),
+            github_token=get("GITHUB_TOKEN"),
+            azure_deployment=get("AZURE_OPENAI_DEPLOYMENT"),
+            azure_key=get("AZURE_OPENAI_API_KEY"),
+            azure_url=get("AZURE_OPENAI_ENDPOINT"),
+            status_failed=get("STATUS_FAILED", failed),
+            status_done=get("STATUS_DONE", done),
+            status_in_progress=get("STATUS_IN_PROGRESS", in_progress),
+            default_persona=get("DEFAULT_PERSONA"),
+            branch_prefix=prefix,
+            gate_min_words=int(gate_raw) if gate_raw.isdigit() else 5,
+            app_id=app_id,
+            app_name=app_name or app_id,
+        )
+
+    @classmethod
+    def from_env(cls) -> "PipelineConfig":
+        return cls.from_settings(os.environ)
+
+    @property
+    def ticket_query(self) -> str:
+        return self.ado_wiql if self.ticket_provider == "ado" else self.jira_jql
+
+    @property
+    def azure_model(self) -> str:
+        return f"azure/{self.azure_deployment or 'gpt-4.1-mini'}"
+
+    @property
+    def ticket_url_base(self) -> str:
+        if self.ticket_provider == "ado":
+            return f"{self.ado_org_url.rstrip('/')}/{self.ado_project}/_workitems/edit/"
+        return f"{self.jira_base_url.rstrip('/')}/browse/"
+
+    def missing_settings(self) -> list[str]:
+        required = dict(_REQUIRED_COMMON)
+        required.update(_REQUIRED_ADO if self.ticket_provider == "ado" else _REQUIRED_JIRA)
+        return [key for key, attr in required.items() if not getattr(self, attr)]
+
+    def ticket_executor(self):
+        """A ticket-provider client bound to this app's own credentials."""
+        if self.ticket_provider == "ado":
+            return ADOExecutor(
+                org_url=self.ado_org_url, project=self.ado_project,
+                pat=self.ado_pat, assignee=self.ado_assignee,
+            )
+        return JiraExecutor(base_url=self.jira_base_url, user_email=self.jira_user_email, api_token=self.jira_api_token)
+
+    def ticket_action(self, **fields):
+        # JiraAction and ADOAction share the same field names, so every call
+        # site in run_pipeline stays provider-agnostic.
+        return (ADOAction if self.ticket_provider == "ado" else JiraAction)(**fields)
+
 
 OnStep = Callable[[str, str, Optional[str]], None]
 
@@ -189,11 +260,11 @@ def run_cmd(cmd: list[str], cwd: Path | None = None, silent: bool = False) -> tu
     return r.returncode, r.stdout, r.stderr
 
 
-def gh_api(method: str, path: str, json_data: dict | None = None) -> dict | list:
-    """Call GitHub REST API with the user's token."""
+def gh_api(token: str, method: str, path: str, json_data: dict | None = None) -> dict | list:
+    """Call GitHub REST API with the given (per-application) token."""
     url = f"https://api.github.com{path}"
     headers = {
-        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github.v3+json",
     }
     resp = requests.request(method, url, headers=headers, json=json_data, timeout=30)
@@ -215,56 +286,49 @@ def run_pipeline(
     on_step: OnStep = _noop_on_step,
     target_repo: Optional[str] = None,
     target_branch: Optional[str] = None,
+    config: Optional[PipelineConfig] = None,
 ) -> dict:
     """Runs the 6-stage ticket -> PR pipeline for one ticket (Jira or Azure DevOps,
-    per TICKET_PROVIDER).
+    per the application's ticket provider).
 
     ticket_key: if given, targets that specific ticket/work item directly.
-    Otherwise picks up the next ticket matching JIRA_JQL (Jira) or ADO_WIQL (ADO).
+    Otherwise picks up the next ticket matching the app's JQL (Jira) or WIQL (ADO).
     target_repo / target_branch: "owner/repo" and branch to clone + PR against.
-    Falls back to TARGET_REPO / TARGET_BRANCH env vars if not given.
+    Falls back to the application's TARGET_REPO / TARGET_BRANCH if not given.
+    config: the onboarded application's settings for this run; defaults to .env.
     Returns {status: "success", ticket_key, pr_url, modified_files} on success.
     Raises PipelineHalt(status, message) on any early stop ("failed" or "human").
     """
-    # Picks up any config saved via PUT /api/config since this process started
-    # or since the last run — see _reload_config()'s docstring above.
-    _reload_config()
+    if config is None:
+        try:
+            config = PipelineConfig.from_env()
+        except ValueError as e:
+            raise PipelineHalt("failed", str(e))
+    cfg = config
 
     workspace_dir = Path(tempfile.mkdtemp(prefix="jira_bot_"))
 
-    required = {
-        "AZURE_OPENAI_API_KEY": AZURE_KEY,
-        "AZURE_OPENAI_ENDPOINT": AZURE_URL,
-        "AZURE_OPENAI_DEPLOYMENT": os.getenv("AZURE_OPENAI_DEPLOYMENT"),
-        "GITHUB_TOKEN": GITHUB_TOKEN,
-    }
-    if TICKET_PROVIDER == "ado":
-        required["ADO_ORG_URL"] = os.getenv("ADO_ORG_URL")
-        required["ADO_PROJECT"] = os.getenv("ADO_PROJECT")
-        required["ADO_PAT"] = os.getenv("ADO_PAT")
-    else:
-        required["JIRA_BASE_URL"] = os.getenv("JIRA_BASE_URL")
-        required["JIRA_USER_EMAIL"] = os.getenv("JIRA_USER_EMAIL")
-        required["JIRA_API_TOKEN"] = os.getenv("JIRA_API_TOKEN")
-    missing = [k for k, v in required.items() if not v]
+    missing = cfg.missing_settings()
     if missing:
-        raise PipelineHalt("failed", f"Missing env vars: {', '.join(missing)}")
+        raise PipelineHalt("failed", f"Missing settings for application '{cfg.app_name}': {', '.join(missing)}")
 
-    ticket = TicketExecutor()
+    print(f"  Application: {cfg.app_name} ({cfg.app_id}) · provider: {cfg.ticket_provider}")
+    ticket = cfg.ticket_executor()
+    TicketAction = cfg.ticket_action
 
     # ── STEP 1: FETCH ───────────────────────────────────────────────
     on_step("fetch", "in-progress")
     step("1/8  FETCH — Searching for ticket")
 
-    if TICKET_PROVIDER == "ado":
-        query_desc = str(ticket_key) if ticket_key else (TICKET_QUERY or "tag 'Agent-ready', state 'New'")
+    if cfg.ticket_provider == "ado":
+        query_desc = str(ticket_key) if ticket_key else (cfg.ticket_query or "tag 'Agent-ready', state 'New'")
         result = ticket(TicketAction(
             command="get_ticket",
             ticket_key=str(ticket_key) if ticket_key else "",
-            jql_filter=TICKET_QUERY,
+            jql_filter=cfg.ticket_query,
         ))
     else:
-        query_desc = f'key = "{ticket_key}"' if ticket_key else TICKET_QUERY
+        query_desc = f'key = "{ticket_key}"' if ticket_key else cfg.ticket_query
         result = ticket(TicketAction(command="get_ticket", jql_filter=query_desc))
 
     if result.is_error or not result.result:
@@ -312,9 +376,9 @@ def run_pipeline(
     #   Repo: owner/repo
     #   Branch: main
     #   Persona: frontend-engineer
-    # Repo/branch fall back to explicit run_pipeline args, then TARGET_REPO/
-    # TARGET_BRANCH env vars. Persona falls back to keyword-based selection
-    # (skills_store.select_persona) when not named explicitly.
+    # Repo/branch fall back to explicit run_pipeline args, then the app's
+    # TARGET_REPO/TARGET_BRANCH. Persona falls back to the app's default
+    # persona, then keyword-based selection (skills_store.select_persona).
     repo_match = re.search(r"(?im)^\s*repo(?:sitory)?\s*:\s*(\S+)\s*$", description)
     branch_match = re.search(r"(?im)^\s*branch\s*:\s*(\S+)\s*$", description)
     persona_match = re.search(r"(?im)^\s*persona\s*:\s*(\S+)\s*$", description)
@@ -322,25 +386,23 @@ def run_pipeline(
         target_repo = repo_match.group(1)
     if branch_match:
         target_branch = branch_match.group(1)
-    target_repo = target_repo or DEFAULT_TARGET_REPO
-    target_branch = target_branch or DEFAULT_TARGET_BRANCH
+    target_repo = target_repo or cfg.target_repo
+    target_branch = target_branch or cfg.target_branch
     # Strip those lines from the working description so they don't confuse the gate/agent prompts.
     description = re.sub(r"(?im)^\s*(repo(?:sitory)?|branch|persona)\s*:\s*\S+\s*$", "", description).strip()
 
-    if persona_match and persona_match.group(1) in {
-        s["slug"] for s in skills_store.list_skills() if "error" not in s
-    }:
+    known_personas = {s["slug"] for s in skills_store.list_skills() if "error" not in s}
+    if persona_match and persona_match.group(1) in known_personas:
         persona = persona_match.group(1)
+    elif cfg.default_persona in known_personas:
+        persona = cfg.default_persona
     else:
         persona = skills_store.select_persona(summary, description)
 
     repo_dir = workspace_dir / target_repo.split("/")[-1]
     print(f"  Target repo: {target_repo} ({target_branch})")
 
-    if TICKET_PROVIDER == "ado":
-        ticket_url = f"{os.getenv('ADO_ORG_URL', '').rstrip('/')}/{os.getenv('ADO_PROJECT', '')}/_workitems/edit/{resolved_key}"
-    else:
-        ticket_url = f"{os.getenv('JIRA_BASE_URL', '').rstrip('/')}/browse/{resolved_key}"
+    ticket_url = f"{cfg.ticket_url_base}{resolved_key}"
 
     print(f"  Ticket: {resolved_key}")
     print(f"  Summary: {summary}")
@@ -364,7 +426,7 @@ def run_pipeline(
     on_step("in_progress", "in-progress")
     step("3/8  IN PROGRESS — Moving ticket to in-progress")
 
-    ip_result = ticket(TicketAction(command="update_status", ticket_key=resolved_key, target_status=STATUS_IN_PROGRESS))
+    ip_result = ticket(TicketAction(command="update_status", ticket_key=resolved_key, target_status=cfg.status_in_progress))
     if ip_result.is_error:
         print(f"  !! {ip_result.text}")
         on_step("in_progress", "failed", ip_result.text)
@@ -377,12 +439,12 @@ def run_pipeline(
     step("4/8  CLARITY GATE — Checking ticket detail")
 
     word_count = len(description.split())
-    if word_count < 5:
+    if word_count < cfg.gate_min_words:
         msg = f"Ticket description is too short ({word_count} words). Please provide more detail including specific packages, versions, and repository to modify."
         print(f"  !! {msg}")
         on_step("gate", "human", msg)
         post_comment(msg, "gate", "human")
-        set_ticket_status(STATUS_FAILED, "gate", "human")
+        set_ticket_status(cfg.status_failed, "gate", "human")
         raise PipelineHalt("human", msg)
 
     from openhands.sdk import LLM
@@ -390,9 +452,9 @@ def run_pipeline(
     from pydantic import SecretStr
 
     gate_llm = LLM(
-        model=AZURE_MODEL,
-        api_key=SecretStr(AZURE_KEY),
-        base_url=AZURE_URL,
+        model=cfg.azure_model,
+        api_key=SecretStr(cfg.azure_key),
+        base_url=cfg.azure_url,
     )
 
     gate_prompt = (
@@ -418,7 +480,7 @@ def run_pipeline(
         msg = f"Clarity check failed to run (technical error): {e}"
         on_step("gate", "failed", msg)
         post_comment("Clarity check failed to run (technical error) — please retry or check the bot logs", "gate", "failed")
-        set_ticket_status(STATUS_FAILED, "gate", "failed")
+        set_ticket_status(cfg.status_failed, "gate", "failed")
         raise PipelineHalt("failed", msg)
 
     gate_ok = gate_text.strip().upper().startswith("YES")
@@ -428,7 +490,7 @@ def run_pipeline(
     if not gate_ok:
         on_step("gate", "human", gate_text.strip()[:200])
         post_comment(f"Ticket needs more detail: {gate_text.strip()}", "gate", "human")
-        set_ticket_status(STATUS_FAILED, "gate", "human")
+        set_ticket_status(cfg.status_failed, "gate", "human")
         raise PipelineHalt("human", gate_text.strip())
 
     on_step("gate", "success", gate_text.strip()[:200])
@@ -437,7 +499,7 @@ def run_pipeline(
     on_step("agent", "in-progress")
     step("5/8  AGENT RUN — Cloning repo and running agent")
 
-    repo_url = f"https://{GITHUB_TOKEN}@github.com/{target_repo}.git"
+    repo_url = f"https://{cfg.github_token}@github.com/{target_repo}.git"
     print(f"  Git clone URL: https://<token>@github.com/{target_repo}.git")
     rc, out, err = run_cmd(
         ["git", "clone", "--branch", target_branch, repo_url, str(repo_dir)],
@@ -493,9 +555,9 @@ def run_pipeline(
     from openhands.tools.task_tracker import TaskTrackerTool
 
     agent_llm = LLM(
-        model=AZURE_MODEL,
-        api_key=SecretStr(AZURE_KEY),
-        base_url=AZURE_URL,
+        model=cfg.azure_model,
+        api_key=SecretStr(cfg.azure_key),
+        base_url=cfg.azure_url,
     )
 
     agent = Agent(
@@ -525,7 +587,7 @@ def run_pipeline(
         msg = f"Agent run failed: {str(e)[:300]}"
         on_step("agent", "human", msg)
         post_comment(msg, "agent", "human")
-        set_ticket_status(STATUS_FAILED, "agent", "human")
+        set_ticket_status(cfg.status_failed, "agent", "human")
         raise PipelineHalt("human", msg)
 
     # ── STEP 4: VERIFY SUCCESS ─────────────────────────────────────
@@ -555,7 +617,7 @@ def run_pipeline(
         print(f"  !! {msg}")
         on_step("agent", "human", msg)
         post_comment(msg, "agent", "human")
-        set_ticket_status(STATUS_FAILED, "agent", "human")
+        set_ticket_status(cfg.status_failed, "agent", "human")
         raise PipelineHalt("human", msg)
 
     print(f"  [OK] Modified files: {modified_files}")
@@ -577,7 +639,7 @@ def run_pipeline(
             print(f"  !! {msg}")
             on_step("agent", "human", msg)
             post_comment(msg, "agent", "human")
-            set_ticket_status(STATUS_FAILED, "agent", "human")
+            set_ticket_status(cfg.status_failed, "agent", "human")
             raise PipelineHalt("human", msg)
 
     print("  [OK] Work verified successfully")
@@ -594,7 +656,7 @@ def run_pipeline(
     short_desc = re.sub(r"[^a-z0-9]+", "-", summary.lower()).strip("-")[:40].strip("-")
     # Unique per run so re-running the same ticket never collides with a branch
     # (and PR) an earlier run already pushed.
-    branch_name = f"feat/{resolved_key}-{short_desc}-{uuid.uuid4().hex[:6]}"
+    branch_name = f"{cfg.branch_prefix}{resolved_key}-{short_desc}-{uuid.uuid4().hex[:6]}"
 
     rc, _, err = run_cmd(["git", "checkout", "-b", branch_name], repo_dir)
     if rc != 0:
@@ -626,7 +688,7 @@ def run_pipeline(
             raise PipelineHalt("human", msg)
         print("  [OK] Agent already committed its changes; nothing further to stage")
 
-    push_url = f"https://{GITHUB_TOKEN}@github.com/{target_repo}.git"
+    push_url = f"https://{cfg.github_token}@github.com/{target_repo}.git"
     print(f"  Git push to: https://<token>@github.com/{target_repo}.git {branch_name}")
     rc, out, err = run_cmd(["git", "push", push_url, branch_name], repo_dir)
     if rc != 0:
@@ -650,7 +712,7 @@ def run_pipeline(
         f"- Ready for human review.\n"
     )
 
-    pr_data = gh_api("POST", f"/repos/{target_repo}/pulls", {
+    pr_data = gh_api(cfg.github_token, "POST", f"/repos/{target_repo}/pulls", {
         "title": pr_title,
         "head": branch_name,
         "base": target_branch,
@@ -671,12 +733,12 @@ def run_pipeline(
         f"Tests verified: [OK]"
     )
 
-    on_step("jira", "success", f"{resolved_key} -> {STATUS_DONE}")
+    on_step("jira", "success", f"{resolved_key} -> {cfg.status_done}")
     post_comment(completion_comment, "jira", "success")
-    set_ticket_status(STATUS_DONE, "jira", "success")
+    set_ticket_status(cfg.status_done, "jira", "success")
 
     print(f"\n{'=' * 60}")
-    print(f"  [OK] DONE — {resolved_key} is now {STATUS_DONE}")
+    print(f"  [OK] DONE — {resolved_key} is now {cfg.status_done}")
     print(f"  PR: {pr_url}")
     print(f"{'=' * 60}")
 

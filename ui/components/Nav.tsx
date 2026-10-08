@@ -4,6 +4,10 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { getGithubUser, getStats, logoutGithub, type GithubUser } from '@/lib/api';
+import { useActiveApp } from '@/components/AppContext';
+
+export const appInitials = (name: string) =>
+  name.split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]).join('').toUpperCase() || 'A';
 
 const NAV_ITEMS = [
   { label: 'Dashboard', href: '/', icon: 'home', color: '#7c3aed' },
@@ -56,6 +60,8 @@ export default function Nav() {
   const [dark, setDark] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [switcherOpen, setSwitcherOpen] = useState(false);
+  const { apps, activeApp, activeAppId, setActiveAppId } = useActiveApp();
   const [githubUser, setGithubUser] = useState<GithubUser | null>(null);
   const [backendUp, setBackendUp] = useState<boolean | null>(null);
   const [query, setQuery] = useState('');
@@ -86,6 +92,7 @@ export default function Nav() {
       if (e.key === 'Escape') {
         searchRef.current?.blur();
         setMenuOpen(false);
+        setSwitcherOpen(false);
         setMobileOpen(false);
       }
     };
@@ -94,13 +101,21 @@ export default function Nav() {
   }, []);
 
   useEffect(() => {
-    if (!menuOpen) return;
+    if (!menuOpen && !switcherOpen) return;
     const onDown = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false);
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+        setSwitcherOpen(false);
+      }
     };
     document.addEventListener('mousedown', onDown);
     return () => document.removeEventListener('mousedown', onDown);
-  }, [menuOpen]);
+  }, [menuOpen, switcherOpen]);
+
+  const switchApp = (id: string) => {
+    setActiveAppId(id);
+    setSwitcherOpen(false);
+  };
 
   const toggleDark = () => {
     const next = !dark;
@@ -158,6 +173,41 @@ export default function Nav() {
         </label>
 
         <div className="top-actions" ref={menuRef}>
+          <div className="app-switch">
+            <button
+              className={`app-pill${switcherOpen ? ' open' : ''}`}
+              aria-label="Switch application"
+              onClick={() => { setSwitcherOpen((o) => !o); setMenuOpen(false); }}
+            >
+              <span className="app-avatar">{appInitials(activeApp?.name ?? 'Default')}</span>
+              <span className="app-pill-text">
+                <small>Application</small>
+                <b>{activeApp?.name ?? 'Default application'}</b>
+              </span>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6" /></svg>
+            </button>
+            {switcherOpen && (
+              <div className="account-menu app-menu">
+                <div className="account-menu-head">
+                  <small>Switch application</small>
+                  <b>{apps.length} onboarded</b>
+                </div>
+                {apps.map((a) => (
+                  <button key={a.id} className={`app-option${a.id === activeAppId ? ' active' : ''}`} onClick={() => switchApp(a.id)}>
+                    <span className="app-avatar">{appInitials(a.name)}</span>
+                    <span className="app-option-text">
+                      {a.name}
+                      <span>{a.ticket_provider === 'ado' ? 'Azure DevOps' : 'Jira'} · {a.target_repo || 'no repository yet'}</span>
+                    </span>
+                    {a.id === activeAppId && <span className="app-option-check">✓</span>}
+                  </button>
+                ))}
+                <div className="app-menu-divider" />
+                <Link href="/applications?onboard=1" onClick={() => setSwitcherOpen(false)}>＋ Onboard application</Link>
+                <Link href="/applications" onClick={() => setSwitcherOpen(false)}>Manage applications</Link>
+              </div>
+            )}
+          </div>
           <button className="icon-btn" aria-label="Toggle theme" onClick={toggleDark} title={dark ? 'Light theme' : 'Dark theme'}>
             {dark ? (
               <svg {...STROKE}><circle cx="12" cy="12" r="5" /><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" /></svg>
@@ -168,7 +218,7 @@ export default function Nav() {
           <button
             className="avatar-btn"
             aria-label="Account"
-            onClick={() => setMenuOpen((o) => !o)}
+            onClick={() => { setMenuOpen((o) => !o); setSwitcherOpen(false); }}
             style={{ backgroundImage: githubUser?.avatar_url ? `url(${githubUser.avatar_url})` : undefined }}
           >
             {!githubUser?.avatar_url && initials}
@@ -179,7 +229,7 @@ export default function Nav() {
                 <small>Signed in with GitHub</small>
                 <b>{githubUser ? `@${githubUser.login}` : 'Unknown user'}</b>
               </div>
-              <Link href="/applications" onClick={() => setMenuOpen(false)}>Manage repository</Link>
+              <Link href="/applications" onClick={() => setMenuOpen(false)}>Manage applications</Link>
               <button onClick={handleLogout}>Log out</button>
             </div>
           )}

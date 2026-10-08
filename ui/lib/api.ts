@@ -13,6 +13,7 @@ export type RunStatus = 'in-progress' | 'success' | 'failed' | 'error' | 'human'
 
 export type RunRecord = {
   id: string;
+  app_id: string;
   ticket_key: string;
   status: RunStatus;
   pr_url: string | null;
@@ -47,23 +48,26 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json();
 }
 
-export function getStats(): Promise<RunStats> {
-  return request<RunStats>('/api/stats');
+const appQuery = (appId?: string) => (appId ? `?app_id=${encodeURIComponent(appId)}` : '');
+
+// appId scopes to one onboarded application; omit it for every application.
+export function getStats(appId?: string): Promise<RunStats> {
+  return request<RunStats>(`/api/stats${appQuery(appId)}`);
 }
 
-export function getRuns(): Promise<RunRecord[]> {
-  return request<RunRecord[]>('/api/runs');
+export function getRuns(appId?: string): Promise<RunRecord[]> {
+  return request<RunRecord[]>(`/api/runs${appQuery(appId)}`);
 }
 
 export function getRunStatus(runId: string): Promise<RunRecord> {
   return request<RunRecord>(`/api/run-status/${runId}`);
 }
 
-export function runTicket(ticketKey: string): Promise<{ run_id: string }> {
-  return request<{ run_id: string }>('/api/run-ticket', {
+export function runTicket(ticketKey: string, appId?: string): Promise<{ run_id: string; app_id: string }> {
+  return request<{ run_id: string; app_id: string }>('/api/run-ticket', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ticket_key: ticketKey }),
+    body: JSON.stringify({ ticket_key: ticketKey, app_id: appId }),
   });
 }
 
@@ -145,6 +149,74 @@ export function updateConfig(updates: ConfigUpdate): Promise<IntegrationConfig> 
   });
 }
 
+// ── Onboarded applications ───────────────────────────────────────────
+export type Application = {
+  id: string;
+  name: string;
+  team: string;
+  description: string;
+  is_default: boolean;
+  ticket_provider: 'jira' | 'ado';
+  target_repo: string;
+  target_branch: string;
+  default_persona: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export const APP_SECRET_FIELDS = ['JIRA_API_TOKEN', 'ADO_PAT', 'GITHUB_TOKEN', 'AZURE_OPENAI_API_KEY'] as const;
+export type AppSecretKey = typeof APP_SECRET_FIELDS[number];
+export type AppSettingKey = Exclude<keyof IntegrationConfig, AppSecretKey> | 'DEFAULT_PERSONA' | 'BRANCH_PREFIX' | 'GATE_MIN_WORDS';
+
+// values = this app's own overrides ('' = not overridden), inherited = the
+// server-wide (.env) value a blank field falls back to, effective = what a
+// run actually uses. Secrets only ever come back as {set, inherited}.
+export type AppConfig = {
+  app: Application;
+  values: Record<AppSettingKey, string>;
+  inherited: Record<AppSettingKey, string>;
+  effective: Record<AppSettingKey, string>;
+  secrets: Record<AppSecretKey, { set: boolean; inherited: boolean }>;
+};
+
+export type AppConfigUpdate = Partial<Record<AppSettingKey | AppSecretKey, string>>;
+
+export function listApps(): Promise<Application[]> {
+  return request<Application[]>('/api/apps');
+}
+
+export function createApp(body: { name: string; team?: string; description?: string; config?: AppConfigUpdate }): Promise<Application> {
+  return request<Application>('/api/apps', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+export function updateApp(appId: string, body: { name?: string; team?: string; description?: string }): Promise<Application> {
+  return request<Application>(`/api/apps/${encodeURIComponent(appId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+export function deleteApp(appId: string): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(`/api/apps/${encodeURIComponent(appId)}`, { method: 'DELETE' });
+}
+
+export function getAppConfig(appId: string): Promise<AppConfig> {
+  return request<AppConfig>(`/api/apps/${encodeURIComponent(appId)}/config`);
+}
+
+export function updateAppConfig(appId: string, updates: AppConfigUpdate): Promise<AppConfig> {
+  return request<AppConfig>(`/api/apps/${encodeURIComponent(appId)}/config`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(updates),
+  });
+}
+
 // ── GitHub OAuth login + repo picker ─────────────────────────────────
 export type GithubUser = {
   login: string;
@@ -177,11 +249,11 @@ export function getGithubRepos(): Promise<GithubRepo[]> {
   return request<GithubRepo[]>('/api/github/repos');
 }
 
-export function selectGithubRepo(fullName: string, defaultBranch?: string): Promise<IntegrationConfig> {
-  return request<IntegrationConfig>('/api/github/select-repo', {
+export function selectGithubRepo(fullName: string, defaultBranch: string | undefined, appId: string): Promise<AppConfig> {
+  return request<AppConfig>('/api/github/select-repo', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ full_name: fullName, default_branch: defaultBranch }),
+    body: JSON.stringify({ full_name: fullName, default_branch: defaultBranch, app_id: appId }),
   });
 }
 

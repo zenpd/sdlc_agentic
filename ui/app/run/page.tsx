@@ -8,6 +8,7 @@ import StatusBadge from '@/components/StatusBadge';
 import AgentActivity from '@/components/AgentActivity';
 import StageProgress from '@/components/StageProgress';
 import { runTicket, getRunStatus, formatDuration, type RunRecord, type StepInfo } from '@/lib/api';
+import { useActiveApp } from '@/components/AppContext';
 
 const STEPS: StepInfo[] = [
   { key: 'fetch', label: 'Fetching ticket', state: 'pending' },
@@ -75,6 +76,7 @@ export default function RunPage() {
   const [error, setError]       = useState<string | null>(null);
   const [running, setRunning]   = useState(false);
   const [elapsed, setElapsed]   = useState(0);
+  const { activeApp, activeAppId } = useActiveApp();
 
   const intervalRef   = useRef<ReturnType<typeof setInterval> | null>(null);
   const timerRef      = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -128,7 +130,7 @@ export default function RunPage() {
     setRunning(true);
 
     try {
-      const { run_id } = await runTicket(ticketKey.trim());
+      const { run_id } = await runTicket(ticketKey.trim(), activeAppId);
       setRunId(run_id);
       startPolling(run_id);
     } catch (e: any) {
@@ -180,6 +182,14 @@ export default function RunPage() {
               ) : 'Run Pipeline'}
             </button>
           </div>
+          {activeApp && (
+            <div className="app-card-meta" style={{ marginTop: 14 }}>
+              <span className="chip purple">Application · {activeApp.name}</span>
+              <span className="chip">{activeApp.ticket_provider === 'ado' ? 'Azure DevOps' : 'Jira'}</span>
+              <span className="chip">{activeApp.target_repo ? `${activeApp.target_repo} · ${activeApp.target_branch}` : 'No repository yet'}</span>
+              <span className="chip">{activeApp.default_persona ? `persona · ${activeApp.default_persona}` : 'persona · auto'}</span>
+            </div>
+          )}
           {error && <p style={{ marginTop: 12, color: 'var(--color-red)', fontSize: 13 }}>{error}</p>}
         </div>
 

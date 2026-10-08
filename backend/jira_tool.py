@@ -58,27 +58,39 @@ class JiraObservation(Observation):
 
 
 class JiraExecutor(ToolExecutor[JiraAction, JiraObservation]):
-    def __init__(self):
+    def __init__(
+        self,
+        base_url: str | None = None,
+        user_email: str | None = None,
+        api_token: str | None = None,
+    ):
+        # Explicit values come from the onboarded application's config (see
+        # jira_bot.PipelineConfig); any left as None fall back to the process
+        # environment so the standalone JiraTool registration keeps working.
+        self._base_url = base_url if base_url is not None else os.getenv("JIRA_BASE_URL", "")
+        self._user_email = user_email if user_email is not None else os.getenv("JIRA_USER_EMAIL", "")
+        self._api_token = api_token if api_token is not None else os.getenv("JIRA_API_TOKEN", "")
         self._jira: JIRA | None = None
-        self._ensure_env()
+        self._ensure_settings()
         self._connect()
 
-    @staticmethod
-    def _ensure_env():
-        missing = [v for v in ENV_VARS if not os.getenv(v)]
+    def _ensure_settings(self):
+        values = {
+            "JIRA_BASE_URL": self._base_url,
+            "JIRA_USER_EMAIL": self._user_email,
+            "JIRA_API_TOKEN": self._api_token,
+        }
+        missing = [k for k in ENV_VARS if not values[k]]
         if missing:
             raise RuntimeError(
-                "JiraTool: Missing required environment variables: "
-                f"{', '.join(missing)}. "
+                "JiraTool: Missing required settings: "
+                f"{', '.join(sorted(missing))}. "
                 "Set JIRA_BASE_URL, JIRA_USER_EMAIL, and JIRA_API_TOKEN."
             )
 
     def _connect(self):
-        url = os.environ["JIRA_BASE_URL"]
-        email = os.environ["JIRA_USER_EMAIL"]
-        token = os.environ["JIRA_API_TOKEN"]
-        logger.info(f"Connecting to Jira at {url}")
-        self._jira = JIRA(server=url, basic_auth=(email, token))
+        logger.info(f"Connecting to Jira at {self._base_url}")
+        self._jira = JIRA(server=self._base_url, basic_auth=(self._user_email, self._api_token))
 
     def __call__(
         self, action: JiraAction, conversation=None

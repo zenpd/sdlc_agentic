@@ -6,6 +6,7 @@ import Nav from '@/components/Nav';
 import PageHeader from '@/components/PageHeader';
 import StatusBadge from '@/components/StatusBadge';
 import { getRuns, runTicket, formatDuration, formatTime, type RunRecord } from '@/lib/api';
+import { useActiveApp } from '@/components/AppContext';
 
 const STORAGE_KEY = 'bulk-request-ticket-ids';
 
@@ -122,6 +123,7 @@ export default function BulkRequestPage() {
   const [error, setError] = useState<string | null>(null);
   const [runningIds, setRunningIds] = useState<Set<string>>(new Set());
   const [bulkRunning, setBulkRunning] = useState(false);
+  const { activeApp, activeAppId } = useActiveApp();
 
   useEffect(() => {
     setTicketIds(loadStoredIds());
@@ -133,12 +135,12 @@ export default function BulkRequestPage() {
 
   const refresh = useCallback(async () => {
     try {
-      setRuns(await getRuns());
+      setRuns(await getRuns(activeAppId));
       setError(null);
     } catch (e: any) {
       setError(e.message);
     }
-  }, []);
+  }, [activeAppId]);
 
   useEffect(() => {
     refresh().finally(() => setLoading(false));
@@ -168,7 +170,7 @@ export default function BulkRequestPage() {
   const runOne = async (id: string) => {
     setRunningIds((s) => new Set(s).add(id));
     try {
-      await runTicket(id);
+      await runTicket(id, activeAppId);
       await refresh();
     } catch (e: any) {
       setError(e.message);
@@ -185,7 +187,7 @@ export default function BulkRequestPage() {
       // Fire every ticket in parallel — none of these await each other, so
       // the backend receives and starts all of them at once, same as running
       // them by hand from separate tabs simultaneously.
-      await Promise.allSettled(ticketIds.map((id) => runTicket(id)));
+      await Promise.allSettled(ticketIds.map((id) => runTicket(id, activeAppId)));
       await refresh();
     } finally {
       setRunningIds(new Set());
@@ -213,7 +215,7 @@ export default function BulkRequestPage() {
         <PageHeader
           eyebrow="Parallel execution"
           title="Bulk Request"
-          description="Add any number of ticket IDs and run them all at once, in parallel — not one at a time."
+          description={`Add any number of ticket IDs and run them all at once, in parallel — not one at a time. Runs use ${activeApp?.name ?? 'the active application'}'s settings.`}
         />
 
         <div className="card-main" style={{ padding: '18px 20px', marginBottom: 20 }}>

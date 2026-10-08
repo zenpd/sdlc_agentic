@@ -90,29 +90,33 @@ class ADOObservation(Observation):
 
 
 class ADOExecutor(ToolExecutor[ADOAction, ADOObservation]):
-    def __init__(self):
-        self._org_url: str = ""
-        self._project: str = ""
-        self._pat: str = ""
+    def __init__(
+        self,
+        org_url: str | None = None,
+        project: str | None = None,
+        pat: str | None = None,
+        assignee: str | None = None,
+    ):
+        # Explicit values come from the onboarded application's config (see
+        # jira_bot.PipelineConfig); any left as None fall back to the process
+        # environment so the standalone ADOTool registration keeps working.
+        self._org_url: str = (org_url if org_url is not None else os.getenv("ADO_ORG_URL", "")).rstrip("/")
+        self._project: str = project if project is not None else os.getenv("ADO_PROJECT", "")
+        self._pat: str = pat if pat is not None else os.getenv("ADO_PAT", "")
+        self._assignee: str = assignee if assignee is not None else os.getenv("ADO_ASSIGNEE", "")
         self._me: dict | None = None
-        self._ensure_env()
-        self._connect()
+        self._ensure_settings()
+        logger.info(f"Connecting to Azure DevOps at {self._org_url}/{self._project}")
 
-    @staticmethod
-    def _ensure_env():
-        missing = [v for v in ENV_VARS if not os.getenv(v)]
+    def _ensure_settings(self):
+        values = {"ADO_ORG_URL": self._org_url, "ADO_PROJECT": self._project, "ADO_PAT": self._pat}
+        missing = [k for k in ENV_VARS if not values[k]]
         if missing:
             raise RuntimeError(
-                "ADOTool: Missing required environment variables: "
-                f"{', '.join(missing)}. "
+                "ADOTool: Missing required settings: "
+                f"{', '.join(sorted(missing))}. "
                 "Set ADO_ORG_URL, ADO_PROJECT, and ADO_PAT."
             )
-
-    def _connect(self):
-        self._org_url = os.environ["ADO_ORG_URL"].rstrip("/")
-        self._project = os.environ["ADO_PROJECT"]
-        self._pat = os.environ["ADO_PAT"]
-        logger.info(f"Connecting to Azure DevOps at {self._org_url}/{self._project}")
 
     def _session(self) -> requests.Session:
         s = requests.Session()
@@ -307,7 +311,7 @@ class ADOExecutor(ToolExecutor[ADOAction, ADOObservation]):
             identity = me.get("emailAddress") or me.get("displayName")
             display_name = me.get("displayName", identity)
         except requests.RequestException:
-            identity = os.getenv("ADO_ASSIGNEE")
+            identity = self._assignee
             if not identity:
                 return ADOObservation.from_text(
                     text=(

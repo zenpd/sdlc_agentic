@@ -5,9 +5,10 @@ import Link from 'next/link';
 import Nav from '@/components/Nav';
 import StatCard from '@/components/StatCard';
 import StatusBadge from '@/components/StatusBadge';
+import { useActiveApp } from '@/components/AppContext';
 import {
-  getStats, getRuns, getConfig, formatDuration, formatTime,
-  type RunStats, type RunRecord, type IntegrationConfig,
+  getStats, getRuns, getAppConfig, formatDuration, formatTime,
+  type RunStats, type RunRecord, type AppConfig,
 } from '@/lib/api';
 
 const ticketLabel = (key: string) => (/^\d+$/.test(key) ? `#${key}` : key);
@@ -83,14 +84,15 @@ function LivePreview({ lines }: { lines: Array<{ cls: string; text: string }> })
 export default function DashboardPage() {
   const [stats, setStats] = useState<RunStats | null>(null);
   const [runs, setRuns] = useState<RunRecord[]>([]);
-  const [config, setConfig] = useState<IntegrationConfig | null>(null);
+  const [appConfig, setAppConfig] = useState<AppConfig | null>(null);
   const [backendUp, setBackendUp] = useState<boolean | null>(null);
+  const { activeApp, activeAppId } = useActiveApp();
 
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
       try {
-        const [s, r] = await Promise.all([getStats(), getRuns()]);
+        const [s, r] = await Promise.all([getStats(activeAppId), getRuns(activeAppId)]);
         if (cancelled) return;
         setStats(s); setRuns(r); setBackendUp(true);
       } catch {
@@ -98,18 +100,21 @@ export default function DashboardPage() {
       }
     };
     load();
-    getConfig().then((c) => { if (!cancelled) setConfig(c); }).catch(() => {});
+    getAppConfig(activeAppId).then((c) => { if (!cancelled) setAppConfig(c); }).catch(() => {});
     const t = setInterval(load, 15000);
     return () => { cancelled = true; clearInterval(t); };
-  }, []);
+  }, [activeAppId]);
 
   const maxDaily = Math.max(1, ...(stats?.daily ?? []).map((d) => d.success + d.failed));
   const weekTotal = (stats?.daily ?? []).reduce((a, d) => a + d.success + d.failed, 0);
   const successRate = stats?.success_rate ?? 0;
   const latest = runs[0];
-  const provider = config?.TICKET_PROVIDER === 'ado' ? 'Azure DevOps' : config?.TICKET_PROVIDER === 'jira' ? 'Jira' : '—';
-  const ticketSecretSet = config?.TICKET_PROVIDER === 'ado' ? config?.ADO_PAT.set : config?.JIRA_API_TOKEN.set;
-  const fullyConfigured = !!(config && config.TARGET_REPO && config.GITHUB_TOKEN.set && config.AZURE_OPENAI_API_KEY.set && ticketSecretSet);
+  const config = appConfig?.effective;
+  const secrets = appConfig?.secrets;
+  const providerKey = config ? config.TICKET_PROVIDER || 'jira' : '';
+  const provider = providerKey === 'ado' ? 'Azure DevOps' : providerKey === 'jira' ? 'Jira' : '—';
+  const ticketSecretSet = providerKey === 'ado' ? secrets?.ADO_PAT.set : secrets?.JIRA_API_TOKEN.set;
+  const fullyConfigured = !!(config && config.TARGET_REPO && secrets?.GITHUB_TOKEN.set && secrets?.AZURE_OPENAI_API_KEY.set && ticketSecretSet);
 
   return (
     <div className="bg-bg min-h-screen">
@@ -238,6 +243,7 @@ export default function DashboardPage() {
               </p>
             </div>
             <div style={{ marginTop: 14 }}>
+              <div className="kv-row"><span>Application</span><b title={activeApp?.name}>{activeApp?.name ?? '—'}</b></div>
               <div className="kv-row"><span>Ticket provider</span><b>{provider}</b></div>
               <div className="kv-row"><span>Repository</span><b title={config?.TARGET_REPO}>{config?.TARGET_REPO || '—'}</b></div>
               <div className="kv-row"><span>Branch</span><b>{config?.TARGET_BRANCH || '—'}</b></div>

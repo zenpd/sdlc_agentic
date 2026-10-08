@@ -1,12 +1,15 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useRouter } from 'next/navigation';
-import Nav from '@/components/Nav';
+import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
+import Link from 'next/link';
+import { useRouter, useSearchParams } from 'next/navigation';
+import Nav, { appInitials } from '@/components/Nav';
 import PageHeader from '@/components/PageHeader';
+import { useActiveApp } from '@/components/AppContext';
 import {
-  getGithubUser, logoutGithub, getGithubRepos, selectGithubRepo,
-  getConfig, GITHUB_LOGIN_PATH, type GithubUser, type GithubRepo,
+  getGithubUser, logoutGithub, getGithubRepos, selectGithubRepo, createApp, deleteApp,
+  getAppConfig, listSkills, GITHUB_LOGIN_PATH,
+  type GithubUser, type GithubRepo, type Application, type AppConfigUpdate, type SkillSummary,
 } from '@/lib/api';
 
 function GithubIcon({ size = 16 }: { size?: number }) {
@@ -77,20 +80,232 @@ function RepoCard({
   );
 }
 
-export default function ApplicationsPage() {
+function AppCard({
+  app, active, onSelect, onDelete,
+}: { app: Application; active: boolean; onSelect: () => void; onDelete: () => void }) {
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      className={`card-main app-card${active ? ' active' : ''}`}
+      onClick={onSelect}
+      onKeyDown={(e) => { if (e.key === 'Enter') onSelect(); }}
+    >
+      <div className="app-card-head">
+        <span className="app-avatar lg">{appInitials(app.name)}</span>
+        <div style={{ minWidth: 0 }}>
+          <h3>{app.name}</h3>
+          <p>{app.team || (app.is_default ? 'Server-wide settings' : 'No team set')}</p>
+        </div>
+        {active && <span className="active-tag">ACTIVE</span>}
+      </div>
+      <div className="app-card-meta">
+        <span className="chip purple">{app.ticket_provider === 'ado' ? 'Azure DevOps' : 'Jira'}</span>
+        <span className="chip" title={app.target_repo}>{app.target_repo ? `${app.target_repo} · ${app.target_branch}` : 'No repository yet'}</span>
+        <span className="chip">{app.default_persona ? `persona · ${app.default_persona}` : 'persona · auto'}</span>
+      </div>
+      <div style={{ display: 'flex', gap: 14, fontSize: 12, fontWeight: 700 }}>
+        <Link href="/config" className="link-btn" onClick={(e) => { e.stopPropagation(); onSelect(); }}>Configure →</Link>
+        {!app.is_default && (
+          <button
+            className="link-btn"
+            style={{ border: 0, background: 'none', padding: 0, color: 'var(--color-red)', marginLeft: 'auto' }}
+            onClick={(e) => { e.stopPropagation(); onDelete(); }}
+          >
+            Remove
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const EMPTY_FORM = {
+  name: '', team: '', description: '',
+  TICKET_PROVIDER: 'ado' as 'jira' | 'ado',
+  JIRA_BASE_URL: '', JIRA_USER_EMAIL: '', JIRA_API_TOKEN: '', JIRA_JQL: '',
+  ADO_ORG_URL: '', ADO_PROJECT: '', ADO_PAT: '', ADO_ASSIGNEE: '',
+  DEFAULT_PERSONA: '', BRANCH_PREFIX: '', GATE_MIN_WORDS: '',
+};
+
+function OnboardModal({ onClose, onCreated }: { onClose: () => void; onCreated: (app: Application) => void }) {
+  const [form, setForm] = useState(EMPTY_FORM);
+  const [skills, setSkills] = useState<SkillSummary[]>([]);
+  const [serverDefaults, setServerDefaults] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    listSkills().then((s) => setSkills(s.filter((k) => !k.error))).catch(() => {});
+    getAppConfig('default').then((c) => setServerDefaults(c.inherited)).catch(() => {});
+  }, []);
+
+  const set = (key: keyof typeof EMPTY_FORM) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
+    setForm((f) => ({ ...f, [key]: e.target.value }));
+
+  const hint = (key: string, fallback?: string) => {
+    const v = serverDefaults[key] || fallback;
+    return v ? `Blank = server default: ${v}` : 'Blank = server default';
+  };
+
+  const submit = async () => {
+    if (!form.name.trim()) { setError('Give the application a name.'); return; }
+    setSaving(true);
+    setError(null);
+    const providerKeys = form.TICKET_PROVIDER === 'ado'
+      ? ['ADO_ORG_URL', 'ADO_PROJECT', 'ADO_PAT', 'ADO_ASSIGNEE'] as const
+      : ['JIRA_BASE_URL', 'JIRA_USER_EMAIL', 'JIRA_API_TOKEN', 'JIRA_JQL'] as const;
+    const config: AppConfigUpdate = { TICKET_PROVIDER: form.TICKET_PROVIDER };
+    for (const k of [...providerKeys, 'DEFAULT_PERSONA', 'BRANCH_PREFIX', 'GATE_MIN_WORDS'] as const) {
+      if (form[k].trim()) config[k] = form[k].trim();
+    }
+    try {
+      const app = await createApp({ name: form.name, team: form.team, description: form.description, config });
+      onCreated(app);
+    } catch (e: any) {
+      setError(e.message);
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="card-main modal-card" role="dialog" aria-modal="true" aria-label="Onboard application">
+        <div className="eyebrow">✦ New application</div>
+        <h2>Onboard an application</h2>
+        <p style={{ fontSize: 13, color: 'var(--color-text-secondary)', margin: '6px 0 20px', lineHeight: 1.55 }}>
+          Each application keeps its own ticket board, repository, and defaults. Anything you leave blank uses the
+          server-wide setting, so you only fill in what&apos;s different.
+        </p>
+
+        {error && <div className="alert error" style={{ marginBottom: 14 }}>{error}</div>}
+
+        <div className="form-grid">
+          <div className="form-section-label">About</div>
+          <div>
+            <label className="label-main">Application name *</label>
+            <input className="input-main" value={form.name} onChange={set('name')} placeholder="Checkout Service" autoFocus />
+          </div>
+          <div>
+            <label className="label-main">Team</label>
+            <input className="input-main" value={form.team} onChange={set('team')} placeholder="Payments" />
+          </div>
+          <div style={{ gridColumn: '1 / -1' }}>
+            <label className="label-main">Description</label>
+            <input className="input-main" value={form.description} onChange={set('description')} placeholder="What this application does" />
+          </div>
+
+          <div className="form-section-label">Ticket board</div>
+          <div style={{ gridColumn: '1 / -1' }}>
+            <div className="segmented">
+              {(['ado', 'jira'] as const).map((p) => (
+                <button key={p} type="button" className={form.TICKET_PROVIDER === p ? 'on' : ''}
+                  onClick={() => setForm((f) => ({ ...f, TICKET_PROVIDER: p }))}>
+                  {p === 'ado' ? 'Azure DevOps' : 'Jira'}
+                </button>
+              ))}
+            </div>
+          </div>
+          {form.TICKET_PROVIDER === 'ado' ? (
+            <>
+              <div>
+                <label className="label-main">Org URL</label>
+                <input className="input-main" value={form.ADO_ORG_URL} onChange={set('ADO_ORG_URL')} placeholder="https://dev.azure.com/your-org" />
+                <div className="field-hint">{hint('ADO_ORG_URL')}</div>
+              </div>
+              <div>
+                <label className="label-main">Project</label>
+                <input className="input-main" value={form.ADO_PROJECT} onChange={set('ADO_PROJECT')} placeholder="Your-Project" />
+                <div className="field-hint">{hint('ADO_PROJECT')}</div>
+              </div>
+              <div>
+                <label className="label-main">Personal access token</label>
+                <input className="input-main" type="password" autoComplete="new-password" value={form.ADO_PAT} onChange={set('ADO_PAT')} placeholder="••••••••" />
+                <div className="field-hint">Blank = server default token</div>
+              </div>
+              <div>
+                <label className="label-main">Assignee (optional)</label>
+                <input className="input-main" value={form.ADO_ASSIGNEE} onChange={set('ADO_ASSIGNEE')} placeholder="bot@company.com" />
+              </div>
+            </>
+          ) : (
+            <>
+              <div>
+                <label className="label-main">Jira base URL</label>
+                <input className="input-main" value={form.JIRA_BASE_URL} onChange={set('JIRA_BASE_URL')} placeholder="https://your-domain.atlassian.net" />
+                <div className="field-hint">{hint('JIRA_BASE_URL')}</div>
+              </div>
+              <div>
+                <label className="label-main">Jira user email</label>
+                <input className="input-main" value={form.JIRA_USER_EMAIL} onChange={set('JIRA_USER_EMAIL')} placeholder="bot@company.com" />
+                <div className="field-hint">{hint('JIRA_USER_EMAIL')}</div>
+              </div>
+              <div>
+                <label className="label-main">Jira API token</label>
+                <input className="input-main" type="password" autoComplete="new-password" value={form.JIRA_API_TOKEN} onChange={set('JIRA_API_TOKEN')} placeholder="••••••••" />
+                <div className="field-hint">Blank = server default token</div>
+              </div>
+              <div>
+                <label className="label-main">JQL (optional)</label>
+                <input className="input-main" value={form.JIRA_JQL} onChange={set('JIRA_JQL')} placeholder='labels = "Agent-ready"' />
+              </div>
+            </>
+          )}
+
+          <div className="form-section-label">Defaults for this application</div>
+          <div>
+            <label className="label-main">Default persona</label>
+            <select className="input-main" value={form.DEFAULT_PERSONA} onChange={set('DEFAULT_PERSONA')}>
+              <option value="">Auto — pick from the ticket</option>
+              {skills.map((s) => <option key={s.slug} value={s.slug}>{s.name || s.slug}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="label-main">Branch prefix</label>
+            <input className="input-main" value={form.BRANCH_PREFIX} onChange={set('BRANCH_PREFIX')} placeholder="feat/" />
+          </div>
+          <div>
+            <label className="label-main">Clarity gate — min. words</label>
+            <input className="input-main" inputMode="numeric" value={form.GATE_MIN_WORDS} onChange={set('GATE_MIN_WORDS')} placeholder="5" />
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 24 }}>
+          <button className="btn-secondary" onClick={onClose} disabled={saving}>Cancel</button>
+          <button className="btn-primary" onClick={submit} disabled={saving} style={{ opacity: saving ? 0.6 : 1 }}>
+            {saving ? 'Onboarding…' : 'Onboard application'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ApplicationsContent() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const { apps, activeApp, activeAppId, setActiveAppId, refreshApps } = useActiveApp();
   const [user, setUser] = useState<GithubUser | null | undefined>(undefined);
   const [repos, setRepos] = useState<GithubRepo[]>([]);
-  const [activeRepo, setActiveRepo] = useState<string>('');
   const [loadingRepos, setLoadingRepos] = useState(false);
   const [selecting, setSelecting] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [onboarding, setOnboarding] = useState(false);
+
+  useEffect(() => {
+    if (searchParams.get('onboard') === '1') setOnboarding(true);
+  }, [searchParams]);
+
+  const closeOnboarding = () => {
+    setOnboarding(false);
+    if (searchParams.get('onboard')) router.replace('/applications');
+  };
 
   const refresh = useCallback(async () => {
-    const [u, cfg] = await Promise.all([getGithubUser(), getConfig().catch(() => null)]);
+    const u = await getGithubUser();
     setUser(u);
-    setActiveRepo(cfg?.TARGET_REPO || '');
     if (u) {
       setLoadingRepos(true);
       try {
@@ -115,13 +330,34 @@ export default function ApplicationsPage() {
   const handleSelect = async (repo: GithubRepo) => {
     setSelecting(repo.full_name);
     try {
-      await selectGithubRepo(repo.full_name, repo.default_branch);
-      setActiveRepo(repo.full_name);
+      await selectGithubRepo(repo.full_name, repo.default_branch, activeAppId);
+      await refreshApps();
       setError(null);
+      setNotice(`${activeApp?.name ?? 'Application'} now works on ${repo.full_name}.`);
     } catch (e: any) {
       setError(e.message);
     } finally {
       setSelecting(null);
+    }
+  };
+
+  const handleCreated = async (app: Application) => {
+    await refreshApps();
+    setActiveAppId(app.id);
+    closeOnboarding();
+    setNotice(`${app.name} is onboarded and active. Pick its repository below.`);
+    document.getElementById('repositories')?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  const handleDelete = async (app: Application) => {
+    if (!window.confirm(`Remove ${app.name}? Its run history is kept.`)) return;
+    try {
+      await deleteApp(app.id);
+      if (app.id === activeAppId) setActiveAppId('default');
+      await refreshApps();
+      setNotice(`${app.name} was removed.`);
+    } catch (e: any) {
+      setError(e.message);
     }
   };
 
@@ -144,12 +380,40 @@ export default function ApplicationsPage() {
 
       <div className="content">
         <PageHeader
-          eyebrow="Source control"
+          eyebrow="Onboarding"
           title="Applications"
-          description="Pick which GitHub repository the agent should work on — no manual token or repo name needed."
+          description="Every team or project gets its own application — its own ticket board, repository, and defaults. Runs always use the active application's settings."
+          actions={<button className="btn-primary" onClick={() => setOnboarding(true)}>＋ Onboard application</button>}
         />
 
         {error && <div className="alert error">{error}</div>}
+        {notice && (
+          <div className="tip-box" style={{ marginBottom: 16 }}>
+            <b>✓ {notice}</b>
+          </div>
+        )}
+
+        <div className="app-grid">
+          {apps.map((app) => (
+            <AppCard
+              key={app.id}
+              app={app}
+              active={app.id === activeAppId}
+              onSelect={() => setActiveAppId(app.id)}
+              onDelete={() => handleDelete(app)}
+            />
+          ))}
+          <button className="card-main app-card add" onClick={() => setOnboarding(true)}>
+            ＋ Onboard application
+          </button>
+        </div>
+
+        <div className="section-title" id="repositories">
+          <div>
+            <h2>Repository for {activeApp?.name ?? 'this application'}</h2>
+            <p>Click a repository to point the active application at it. Runs clone, push, and open pull requests there.</p>
+          </div>
+        </div>
 
         {user === undefined ? (
           <div style={{ color: 'var(--color-text-muted)', fontSize: 14 }}>Loading...</div>
@@ -209,7 +473,7 @@ export default function ApplicationsPage() {
                   <RepoCard
                     key={repo.full_name}
                     repo={repo}
-                    active={repo.full_name === activeRepo}
+                    active={repo.full_name === activeApp?.target_repo}
                     selecting={selecting === repo.full_name}
                     onSelect={() => handleSelect(repo)}
                   />
@@ -219,6 +483,16 @@ export default function ApplicationsPage() {
           </>
         )}
       </div>
+
+      {onboarding && <OnboardModal onClose={closeOnboarding} onCreated={handleCreated} />}
     </div>
+  );
+}
+
+export default function ApplicationsPage() {
+  return (
+    <Suspense fallback={null}>
+      <ApplicationsContent />
+    </Suspense>
   );
 }

@@ -33,18 +33,29 @@ def init_db() -> None:
         )
         """
     )
+    # Every run belongs to an onboarded application (apps_store). Runs from
+    # before applications existed belong to the "default" one.
+    columns = {r["name"] for r in conn.execute("PRAGMA table_info(runs)").fetchall()}
+    if "app_id" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN app_id TEXT NOT NULL DEFAULT 'default'")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_app_started ON runs (app_id, started_at)")
     conn.commit()
     conn.close()
 
 
-def create_run(run_id: str, ticket_key: str, started_at: str) -> None:
+def _scope(app_id: Optional[str]) -> tuple[str, tuple]:
+    """WHERE-clause fragment limiting a query to one application (or none)."""
+    return (" AND app_id = ?", (app_id,)) if app_id else ("", ())
+
+
+def create_run(run_id: str, ticket_key: str, started_at: str, app_id: str = "default") -> None:
     steps = [{"key": k, "label": k, "state": "pending"} for k in STEP_KEYS]
     with _lock:
         conn = _get_conn()
         conn.execute(
-            "INSERT INTO runs (id, ticket_key, status, pr_url, started_at, duration_sec, steps, logs) "
-            "VALUES (?, ?, 'in-progress', NULL, ?, NULL, ?, ?)",
-            (run_id, ticket_key, started_at, json.dumps(steps), json.dumps({})),
+            "INSERT INTO runs (id, ticket_key, status, pr_url, started_at, duration_sec, steps, logs, app_id) "
+            "VALUES (?, ?, 'in-progress', NULL, ?, NULL, ?, ?, ?)",
+            (run_id, ticket_key, started_at, json.dumps(steps), json.dumps({}), app_id),
         )
         conn.commit()
         conn.close()
@@ -86,6 +97,7 @@ def finish_run(run_id: str, status: str, pr_url: Optional[str], duration_sec: in
 def _row_to_dict(row: sqlite3.Row) -> dict:
     return {
         "id": row["id"],
+        "app_id": row["app_id"],
         "ticket_key": row["ticket_key"],
         "status": row["status"],
         "pr_url": row["pr_url"],
@@ -103,32 +115,34 @@ def get_run(run_id: str) -> Optional[dict]:
     return _row_to_dict(row) if row else None
 
 
-def get_runs(limit: int = 50) -> list[dict]:
+def get_runs(limit: int = 50, app_id: Optional[str] = None) -> list[dict]:
+    where, params = _scope(app_id)
     conn = _get_conn()
     rows = conn.execute(
-        "SELECT * FROM runs ORDER BY started_at DESC LIMIT ?", (limit,)
+        f"SELECT * FROM runs WHERE 1 = 1{where} ORDER BY started_at DESC LIMIT ?", (*params, limit)
     ).fetchall()
     conn.close()
     return [_row_to_dict(r) for r in rows]
 
 
-def get_stats() -> dict:
+def get_stats(app_id: Optional[str] = None) -> dict:
+    where, params = _scope(app_id)
     conn = _get_conn()
-    total = conn.execute("SELECT COUNT(*) c FROM runs").fetchone()["c"]
+    total = conn.execute(f"SELECT COUNT(*) c FROM runs WHERE 1 = 1{where}", params).fetchone()["c"]
     success = conn.execute(
-        "SELECT COUNT(*) c FROM runs WHERE status = 'success'"
+        f"SELECT COUNT(*) c FROM runs WHERE status = 'success'{where}", params
     ).fetchone()["c"]
     failed = conn.execute(
-        "SELECT COUNT(*) c FROM runs WHERE status IN ('failed', 'error')"
+        f"SELECT COUNT(*) c FROM runs WHERE status IN ('failed', 'error'){where}", params
     ).fetchone()["c"]
     human = conn.execute(
-        "SELECT COUNT(*) c FROM runs WHERE status = 'human'"
+        f"SELECT COUNT(*) c FROM runs WHERE status = 'human'{where}", params
     ).fetchone()["c"]
 
     success_rate = round((success / total) * 100) if total else 0
 
     avg_row = conn.execute(
-        "SELECT AVG(duration_sec) a FROM runs WHERE duration_sec IS NOT NULL"
+        f"SELECT AVG(duration_sec) a FROM runs WHERE duration_sec IS NOT NULL{where}", params
     ).fetchone()
     avg_duration_sec = int(avg_row["a"]) if avg_row["a"] is not None else None
 
@@ -137,13 +151,13 @@ def get_stats() -> dict:
     for i in range(6, -1, -1):
         day = today - timedelta(days=i)
         row = conn.execute(
-            """
+            f"""
             SELECT
               SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) s,
               SUM(CASE WHEN status IN ('failed', 'error') THEN 1 ELSE 0 END) f
-            FROM runs WHERE substr(started_at, 1, 10) = ?
+            FROM runs WHERE substr(started_at, 1, 10) = ?{where}
             """,
-            (day.isoformat(),),
+            (day.isoformat(), *params),
         ).fetchone()
         daily.append({
             "date": day.strftime("%b %d"),
