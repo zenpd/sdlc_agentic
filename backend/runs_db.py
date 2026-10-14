@@ -38,6 +38,9 @@ def init_db() -> None:
     columns = {r["name"] for r in conn.execute("PRAGMA table_info(runs)").fetchall()}
     if "app_id" not in columns:
         conn.execute("ALTER TABLE runs ADD COLUMN app_id TEXT NOT NULL DEFAULT 'default'")
+    # Who started the run (the signed-in user, not the agent persona).
+    if "triggered_by" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN triggered_by TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_app_started ON runs (app_id, started_at)")
     conn.commit()
     conn.close()
@@ -48,14 +51,14 @@ def _scope(app_id: Optional[str]) -> tuple[str, tuple]:
     return (" AND app_id = ?", (app_id,)) if app_id else ("", ())
 
 
-def create_run(run_id: str, ticket_key: str, started_at: str, app_id: str = "default") -> None:
+def create_run(run_id: str, ticket_key: str, started_at: str, app_id: str = "default", triggered_by: Optional[str] = None) -> None:
     steps = [{"key": k, "label": k, "state": "pending"} for k in STEP_KEYS]
     with _lock:
         conn = _get_conn()
         conn.execute(
-            "INSERT INTO runs (id, ticket_key, status, pr_url, started_at, duration_sec, steps, logs, app_id) "
-            "VALUES (?, ?, 'in-progress', NULL, ?, NULL, ?, ?, ?)",
-            (run_id, ticket_key, started_at, json.dumps(steps), json.dumps({}), app_id),
+            "INSERT INTO runs (id, ticket_key, status, pr_url, started_at, duration_sec, steps, logs, app_id, triggered_by) "
+            "VALUES (?, ?, 'in-progress', NULL, ?, NULL, ?, ?, ?, ?)",
+            (run_id, ticket_key, started_at, json.dumps(steps), json.dumps({}), app_id, triggered_by),
         )
         conn.commit()
         conn.close()
@@ -98,6 +101,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     return {
         "id": row["id"],
         "app_id": row["app_id"],
+        "triggered_by": row["triggered_by"],
         "ticket_key": row["ticket_key"],
         "status": row["status"],
         "pr_url": row["pr_url"],

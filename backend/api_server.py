@@ -8,17 +8,19 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import requests
-from fastapi import Cookie, FastAPI, HTTPException, Query
+from fastapi import Cookie, Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
-from backend import runs_db, skills_store, config_store, oauth_store, apps_store
+from backend import runs_db, skills_store, config_store, oauth_store, apps_store, users_store, audit_store
 from backend.jira_bot import PipelineConfig, PipelineHalt, run_pipeline
 
 runs_db.init_db()
 oauth_store.init_db()
 apps_store.init_db()
+users_store.init_db()
+audit_store.init_db()
 
 GITHUB_OAUTH_CLIENT_ID = os.getenv("GITHUB_OAUTH_CLIENT_ID", "")
 GITHUB_OAUTH_CLIENT_SECRET = os.getenv("GITHUB_OAUTH_CLIENT_SECRET", "")
@@ -36,6 +38,57 @@ app.add_middleware(
 )
 
 
+# ── Who is calling, and what may they do ────────────────────────────
+# Every /api route except the login flow requires a signed-in user, checked
+# here on the server — hiding a button in the UI is not access control.
+def _current_github_session(sdlc_session: Optional[str]) -> dict:
+    session = oauth_store.get_session(sdlc_session) if sdlc_session else None
+    if not session:
+        raise HTTPException(status_code=401, detail="Not signed in")
+    return session
+
+
+def current_user(sdlc_session: Optional[str] = Cookie(default=None)) -> dict:
+    session = _current_github_session(sdlc_session)
+    user = users_store.get_user(session["github_login"])
+    if not user:
+        # Session from before the users table existed — register it now.
+        users_store.ensure_user(session["github_login"], session["avatar_url"])
+        user = users_store.get_user(session["github_login"])
+    return {**user, "session_id": sdlc_session}
+
+
+def require(minimum: str):
+    def dependency(user: dict = Depends(current_user)) -> dict:
+        if not users_store.has_role(user, minimum):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Your role ({user['role']}) can't do this — it needs {minimum} or higher. Ask an admin.",
+            )
+        return user
+    return dependency
+
+
+viewer = Depends(require("viewer"))
+runner = Depends(require("runner"))
+maintainer = Depends(require("maintainer"))
+admin = Depends(require("admin"))
+
+
+def _changes(before: dict, updates: dict, secret_fields: list[str]) -> dict:
+    """Audit diff for a config PUT: old -> new for settings, "updated" for a
+    secret that was given a new value (blank secret = unchanged)."""
+    after = dict(before)
+    for key, value in updates.items():
+        if key in secret_fields:
+            if value:
+                after[key] = object()  # always "different" -> recorded as updated
+        else:
+            after[key] = value or ""
+    return audit_store.config_changes(before, after, secret_fields)
+
+
+# ── Pipeline runs ───────────────────────────────────────────────────
 class RunTicketRequest(BaseModel):
     ticket_key: str
     app_id: Optional[str] = None
@@ -77,18 +130,18 @@ def _execute(run_id: str, ticket_key: str, config: PipelineConfig) -> None:
 
 
 @app.post("/api/run-ticket")
-def run_ticket(req: RunTicketRequest):
+def run_ticket(req: RunTicketRequest, user: dict = runner):
     app_id = _require_app(req.app_id)
     config = _pipeline_config(app_id)
     run_id = str(uuid.uuid4())
     started_at = datetime.now(timezone.utc).isoformat()
-    runs_db.create_run(run_id, req.ticket_key, started_at, app_id)
+    runs_db.create_run(run_id, req.ticket_key, started_at, app_id, triggered_by=user["login"])
     threading.Thread(target=_execute, args=(run_id, req.ticket_key, config), daemon=True).start()
     return {"run_id": run_id, "app_id": app_id}
 
 
 @app.get("/api/run-status/{run_id}")
-def run_status(run_id: str):
+def run_status(run_id: str, user: dict = viewer):
     run = runs_db.get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
@@ -96,12 +149,12 @@ def run_status(run_id: str):
 
 
 @app.get("/api/runs")
-def list_runs(app_id: Optional[str] = Query(default=None)):
+def list_runs(app_id: Optional[str] = Query(default=None), user: dict = viewer):
     return runs_db.get_runs(app_id=app_id)
 
 
 @app.get("/api/stats")
-def stats(app_id: Optional[str] = Query(default=None)):
+def stats(app_id: Optional[str] = Query(default=None), user: dict = viewer):
     return runs_db.get_stats(app_id=app_id)
 
 
@@ -148,65 +201,88 @@ def _set_fields(model: Optional[BaseModel]) -> dict:
     return {k: v for k, v in model.model_dump().items() if v is not None} if model else {}
 
 
-@app.get("/api/apps")
-def list_apps():
-    return apps_store.list_apps()
-
-
-@app.post("/api/apps")
-def create_app(req: AppCreateRequest):
-    try:
-        return apps_store.create_app(req.name, req.team, req.description, _set_fields(req.config))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@app.get("/api/apps/{app_id}")
-def get_app(app_id: str):
+def _app_or_404(app_id: str) -> dict:
     try:
         return apps_store.get_app(app_id)
     except apps_store.AppNotFound:
         raise HTTPException(status_code=404, detail=f"No application named {app_id!r}")
 
 
-@app.patch("/api/apps/{app_id}")
-def update_app(app_id: str, req: AppUpdateRequest):
+@app.get("/api/apps")
+def list_apps(user: dict = viewer):
+    return apps_store.list_apps()
+
+
+@app.post("/api/apps")
+def create_app(req: AppCreateRequest, user: dict = admin):
+    config = _set_fields(req.config)
     try:
-        return apps_store.update_app(app_id, req.name, req.team, req.description)
-    except apps_store.AppNotFound:
-        raise HTTPException(status_code=404, detail=f"No application named {app_id!r}")
+        created = apps_store.create_app(req.name, req.team, req.description, config)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    audit_store.record(user["login"], "app.onboard", created["name"], created["id"], {
+        "team": created["team"],
+        "config": _changes({}, config, apps_store.SECRET_FIELDS),
+    })
+    return created
+
+
+@app.get("/api/apps/{app_id}")
+def get_app(app_id: str, user: dict = viewer):
+    return _app_or_404(app_id)
+
+
+@app.patch("/api/apps/{app_id}")
+def update_app(app_id: str, req: AppUpdateRequest, user: dict = maintainer):
+    before = _app_or_404(app_id)
+    try:
+        after = apps_store.update_app(app_id, req.name, req.team, req.description)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    fields = ("name", "team", "description")
+    changes = audit_store.config_changes({k: before[k] for k in fields}, {k: after[k] for k in fields}, [])
+    if changes:
+        audit_store.record(user["login"], "app.update", after["name"], app_id, changes)
+    return after
 
 
 @app.delete("/api/apps/{app_id}")
-def delete_app(app_id: str):
+def delete_app(app_id: str, user: dict = admin):
+    before = _app_or_404(app_id)
     try:
         apps_store.delete_app(app_id)
-    except apps_store.AppNotFound:
-        raise HTTPException(status_code=404, detail=f"No application named {app_id!r}")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    audit_store.record(user["login"], "app.remove", before["name"], app_id)
     return {"ok": True}
 
 
 @app.get("/api/apps/{app_id}/config")
-def get_app_config(app_id: str):
+def get_app_config(app_id: str, user: dict = viewer):
     try:
-        return apps_store.get_app_config(app_id)
+        cfg = apps_store.get_app_config(app_id)
     except apps_store.AppNotFound:
         raise HTTPException(status_code=404, detail=f"No application named {app_id!r}")
+    if not users_store.has_role(user, "maintainer"):
+        cfg["secrets"] = None  # viewers/runners don't even learn which tokens are set
+    return cfg
 
 
 @app.put("/api/apps/{app_id}/config")
-def update_app_config(app_id: str, req: AppConfigFields):
+def update_app_config(app_id: str, req: AppConfigFields, user: dict = maintainer):
+    updates = _set_fields(req)
     try:
-        apps_store.update_app_config(app_id, _set_fields(req))
-        return apps_store.get_app_config(app_id)
+        before = apps_store.get_app_config(app_id)["values"]
+        apps_store.update_app_config(app_id, updates)
+        after = apps_store.get_app_config(app_id)
     except apps_store.AppNotFound:
         raise HTTPException(status_code=404, detail=f"No application named {app_id!r}")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    changes = _changes(before, updates, apps_store.SECRET_FIELDS)
+    if changes:
+        audit_store.record(user["login"], "app.config", after["app"]["name"], app_id, changes)
+    return after
 
 
 # ── Persona skills ──────────────────────────────────────────────────
@@ -215,12 +291,12 @@ class SkillWriteRequest(BaseModel):
 
 
 @app.get("/api/skills")
-def list_skills():
+def list_skills(user: dict = viewer):
     return skills_store.list_skills()
 
 
 @app.get("/api/skills/{slug}")
-def get_skill(slug: str):
+def get_skill(slug: str, user: dict = viewer):
     try:
         return {"slug": slug, "content": skills_store.read_skill(slug)}
     except FileNotFoundError:
@@ -228,26 +304,35 @@ def get_skill(slug: str):
 
 
 @app.put("/api/skills/{slug}")
-def update_skill(slug: str, req: SkillWriteRequest):
+def update_skill(slug: str, req: SkillWriteRequest, user: dict = maintainer):
+    try:
+        before = skills_store.read_skill(slug)
+    except FileNotFoundError:
+        before = ""
     try:
         skills_store.write_skill(slug, req.content)
     except skills_store.SkillValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    if before != req.content:
+        audit_store.record(user["login"], "skill.update", slug, None, {
+            "lines_before": len(before.splitlines()), "lines_after": len(req.content.splitlines()),
+        })
     return {"slug": slug, "content": skills_store.read_skill(slug)}
 
 
 @app.post("/api/skills")
-def create_skill(slug: str, req: SkillWriteRequest):
+def create_skill(slug: str, req: SkillWriteRequest, user: dict = maintainer):
     try:
         skills_store.create_skill(slug, req.content)
     except FileExistsError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except skills_store.SkillValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    audit_store.record(user["login"], "skill.create", slug, None, {"lines": len(req.content.splitlines())})
     return {"slug": slug, "content": skills_store.read_skill(slug)}
 
 
-# ── Integration config ──────────────────────────────────────────────
+# ── Server defaults (.env) ──────────────────────────────────────────
 class ConfigUpdateRequest(BaseModel):
     TICKET_PROVIDER: Optional[str] = None
     JIRA_BASE_URL: Optional[str] = None
@@ -271,28 +356,59 @@ class ConfigUpdateRequest(BaseModel):
 
 
 @app.get("/api/config")
-def get_config():
+def get_config(user: dict = maintainer):
     return config_store.get_config()
 
 
 @app.put("/api/config")
-def update_config(req: ConfigUpdateRequest):
+def update_config(req: ConfigUpdateRequest, user: dict = admin):
     updates = {k: v for k, v in req.model_dump().items() if v is not None}
+    before = {k: v for k, v in config_store.get_config().items() if k in config_store.NON_SECRET_FIELDS}
     try:
         config_store.update_config(updates)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    changes = _changes(before, updates, config_store.SECRET_FIELDS)
+    if changes:
+        audit_store.record(user["login"], "server.config", "Server defaults (.env)", None, changes)
     return config_store.get_config()
 
 
+# ── Users & roles ───────────────────────────────────────────────────
+class RoleUpdateRequest(BaseModel):
+    role: str
+
+
+@app.get("/api/users")
+def list_users(user: dict = admin):
+    return users_store.list_users()
+
+
+@app.patch("/api/users/{login}")
+def update_user_role(login: str, req: RoleUpdateRequest, user: dict = admin):
+    before = users_store.get_user(login)
+    if not before:
+        raise HTTPException(status_code=404, detail=f"No user named {login!r}")
+    try:
+        after = users_store.set_role(login, req.role)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if before["role"] != after["role"]:
+        audit_store.record(user["login"], "user.role", login, None, {"role": {"from": before["role"], "to": after["role"]}})
+    return after
+
+
+@app.get("/api/audit")
+def list_audit(
+    app_id: Optional[str] = Query(default=None),
+    actor: Optional[str] = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=1000),
+    user: dict = maintainer,
+):
+    return audit_store.list_entries(limit=limit, app_id=app_id, actor=actor)
+
+
 # ── GitHub OAuth login + repo picker ─────────────────────────────────
-def _current_github_session(sdlc_session: Optional[str]) -> dict:
-    session = oauth_store.get_session(sdlc_session) if sdlc_session else None
-    if not session:
-        raise HTTPException(status_code=401, detail="Not connected to GitHub")
-    return session
-
-
 @app.get("/api/auth/github/login")
 def github_login():
     if not GITHUB_OAUTH_CLIENT_ID:
@@ -331,8 +447,12 @@ def github_callback(code: str):
         timeout=15,
     )
     user_data = user_resp.json()
+    login = user_data.get("login", "")
+    if not login:
+        raise HTTPException(status_code=400, detail="GitHub didn't return a username")
 
-    session_id = oauth_store.create_session(access_token, user_data.get("login", ""), user_data.get("avatar_url"))
+    users_store.ensure_user(login, user_data.get("avatar_url"))
+    session_id = oauth_store.create_session(access_token, login, user_data.get("avatar_url"))
 
     redirect = RedirectResponse(f"{FRONTEND_URL}/")
     redirect.set_cookie(
@@ -341,15 +461,14 @@ def github_callback(code: str):
         httponly=True,
         samesite="lax",
         secure=False,
-        max_age=60 * 60 * 24 * 30,
+        max_age=oauth_store.SESSION_MAX_AGE_SEC,
     )
     return redirect
 
 
 @app.get("/api/auth/github/me")
-def github_me(sdlc_session: Optional[str] = Cookie(default=None)):
-    session = _current_github_session(sdlc_session)
-    return {"login": session["github_login"], "avatar_url": session["avatar_url"]}
+def github_me(user: dict = Depends(current_user)):
+    return {"login": user["login"], "avatar_url": user["avatar_url"], "role": user["role"]}
 
 
 @app.post("/api/auth/github/logout")
@@ -362,8 +481,8 @@ def github_logout(sdlc_session: Optional[str] = Cookie(default=None)):
 
 
 @app.get("/api/github/repos")
-def github_repos(sdlc_session: Optional[str] = Cookie(default=None)):
-    session = _current_github_session(sdlc_session)
+def github_repos(user: dict = viewer):
+    session = _current_github_session(user["session_id"])
     repos: list[dict] = []
     page = 1
     while True:
@@ -378,7 +497,7 @@ def github_repos(sdlc_session: Optional[str] = Cookie(default=None)):
             # or the OAuth app's credentials changed since login) — drop the
             # dead session so the frontend re-prompts a fresh login instead of
             # surfacing a raw 500 from GitHub's API.
-            oauth_store.delete_session(sdlc_session)
+            oauth_store.delete_session(user["session_id"])
             raise HTTPException(status_code=401, detail="GitHub session expired — please log in again.")
         resp.raise_for_status()
         batch = resp.json()
@@ -408,11 +527,12 @@ class SelectRepoRequest(BaseModel):
 
 
 @app.post("/api/github/select-repo")
-def github_select_repo(req: SelectRepoRequest, sdlc_session: Optional[str] = Cookie(default=None)):
-    """Points one application at a repository, using the logged-in user's
+def github_select_repo(req: SelectRepoRequest, user: dict = maintainer):
+    """Points one application at a repository, using the signed-in user's
     GitHub token for that application's clone/push/PR calls."""
-    session = _current_github_session(sdlc_session)
+    session = _current_github_session(user["session_id"])
     app_id = _require_app(req.app_id)
+    before = apps_store.get_app_config(app_id)["values"]
     updates = {"TARGET_REPO": req.full_name, "GITHUB_TOKEN": session["access_token"]}
     if req.default_branch:
         updates["TARGET_BRANCH"] = req.default_branch
@@ -420,4 +540,6 @@ def github_select_repo(req: SelectRepoRequest, sdlc_session: Optional[str] = Coo
         apps_store.update_app_config(app_id, updates)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return apps_store.get_app_config(app_id)
+    after = apps_store.get_app_config(app_id)
+    audit_store.record(user["login"], "app.repo", after["app"]["name"], app_id, _changes(before, updates, apps_store.SECRET_FIELDS))
+    return after

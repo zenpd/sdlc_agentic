@@ -45,8 +45,8 @@ function saveStoredIds(ids: string[]) {
 }
 
 function TicketCard({
-  id, run, onRun, onRemove, running,
-}: { id: string; run: RunRecord | null; onRun: () => void; onRemove: () => void; running: boolean }) {
+  id, run, onRun, onRemove, running, canRun,
+}: { id: string; run: RunRecord | null; onRun: () => void; onRemove: () => void; running: boolean; canRun: boolean }) {
   const persona = run ? personaOf(run) : null;
   const summary = run ? summaryOf(run) : null;
 
@@ -86,9 +86,9 @@ function TicketCard({
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, paddingTop: 4, borderTop: '1px solid var(--color-border)', marginTop: 2 }}>
         <button
           onClick={onRun}
-          disabled={running}
+          disabled={running || !canRun}
           className="btn-secondary"
-          style={{ padding: '7px 14px', fontSize: 12.5, opacity: running ? 0.5 : 1 }}
+          style={{ padding: '7px 14px', fontSize: 12.5, opacity: running || !canRun ? 0.5 : 1 }}
         >
           {running ? 'Running…' : run ? 'Re-run' : 'Run'}
         </button>
@@ -123,7 +123,8 @@ export default function BulkRequestPage() {
   const [error, setError] = useState<string | null>(null);
   const [runningIds, setRunningIds] = useState<Set<string>>(new Set());
   const [bulkRunning, setBulkRunning] = useState(false);
-  const { activeApp, activeAppId } = useActiveApp();
+  const { activeApp, activeAppId, me, can } = useActiveApp();
+  const canRun = can('runner');
 
   useEffect(() => {
     setTicketIds(loadStoredIds());
@@ -234,14 +235,15 @@ export default function BulkRequestPage() {
             <div style={{ flex: 1 }} />
             <button
               onClick={runAll}
-              disabled={bulkRunning || ticketIds.length === 0}
+              disabled={bulkRunning || ticketIds.length === 0 || !canRun}
               className="btn-primary"
-              style={{ padding: '10px 20px', fontSize: 13, opacity: bulkRunning || ticketIds.length === 0 ? 0.5 : 1 }}
+              style={{ padding: '10px 20px', fontSize: 13, opacity: bulkRunning || ticketIds.length === 0 || !canRun ? 0.5 : 1 }}
             >
               {bulkRunning ? 'Running all…' : `Run All (${ticketIds.length})`}
             </button>
           </div>
 
+          {me && !canRun && <div className="locked-note" style={{ marginTop: 14 }}>🔒 Your role is <b>{me.role}</b> — starting runs needs <b>runner</b> or higher. Ask an admin.</div>}
           {ticketIds.length > 0 && (
             <div style={{ display: 'flex', gap: 16, marginTop: 14, paddingTop: 14, borderTop: '1px solid var(--color-border)', fontSize: 12.5, color: 'var(--color-text-secondary)', flexWrap: 'wrap' }}>
               <span>{ticketIds.length} tracked</span>
@@ -271,6 +273,7 @@ export default function BulkRequestPage() {
                 onRun={() => runOne(id)}
                 onRemove={() => removeId(id)}
                 running={runningIds.has(id)}
+                canRun={canRun}
               />
             ))}
           </div>

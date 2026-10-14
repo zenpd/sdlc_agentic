@@ -5,54 +5,14 @@ at the same time each use only their own settings.
 Every test runs against a throwaway SQLite file, never backend/runs.db.
 """
 
-import tempfile
 import threading
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from backend import apps_store, oauth_store, runs_db
-
-_TMP_DB = Path(tempfile.mkdtemp(prefix="sdlc_test_")) / "runs.db"
-for _mod in (runs_db, oauth_store, apps_store):
-    _mod.DB_PATH = _TMP_DB
-
-from fastapi.testclient import TestClient  # noqa: E402
-
-from backend import api_server, jira_bot  # noqa: E402  (import after DB_PATH is redirected)
-from backend.jira_bot import PipelineConfig, PipelineHalt  # noqa: E402
-
-client = TestClient(api_server.app)
-
-GLOBAL_ENV = {
-    "TICKET_PROVIDER": "ado",
-    "ADO_ORG_URL": "https://dev.azure.com/global-org",
-    "ADO_PROJECT": "Global-Project",
-    "ADO_PAT": "global-pat",
-    "TARGET_REPO": "global/repo",
-    "TARGET_BRANCH": "dev",
-    "GITHUB_TOKEN": "global-gh-token",
-    "AZURE_OPENAI_ENDPOINT": "https://global.openai.azure.com/",
-    "AZURE_OPENAI_DEPLOYMENT": "gpt-4.1-mini",
-    "AZURE_OPENAI_API_KEY": "global-azure-key",
-}
-
-
-@pytest.fixture(autouse=True)
-def clean_state(monkeypatch):
-    """Fresh tables + a known server-wide (.env) baseline for every test."""
-    conn = apps_store._get_conn()
-    conn.execute("DROP TABLE IF EXISTS applications")
-    conn.execute("DROP TABLE IF EXISTS runs")
-    conn.commit()
-    conn.close()
-    runs_db.init_db()
-    apps_store.init_db()
-    for key in apps_store.SETTING_FIELDS + apps_store.SECRET_FIELDS:
-        monkeypatch.delenv(key, raising=False)
-    for key, value in GLOBAL_ENV.items():
-        monkeypatch.setenv(key, value)
+from conftest import GLOBAL_ENV, client, sign_in
+from backend import api_server, apps_store, jira_bot, runs_db
+from backend.jira_bot import PipelineConfig, PipelineHalt
 
 
 # ── PipelineConfig ───────────────────────────────────────────────────
@@ -133,6 +93,7 @@ def test_validation_slugs_and_default_protection():
 
 # ── API ──────────────────────────────────────────────────────────────
 def test_api_onboarding_flow():
+    sign_in("priya")
     r = client.post("/api/apps", json={"name": "Checkout Service", "team": "Payments",
                                        "config": {"TICKET_PROVIDER": "jira", "JIRA_BASE_URL": "https://x.atlassian.net"}})
     assert r.status_code == 200, r.text
@@ -153,10 +114,12 @@ def test_api_onboarding_flow():
 
 
 def test_run_ticket_rejects_unknown_app():
+    sign_in("priya")
     assert client.post("/api/run-ticket", json={"ticket_key": "1", "app_id": "ghost"}).status_code == 404
 
 
 def test_runs_and_stats_are_scoped_per_app():
+    sign_in("priya")
     apps_store.create_app("Billing")
     runs_db.create_run("r1", "100", "2026-10-07T10:00:00+00:00", "default")
     runs_db.create_run("r2", "200", "2026-10-07T10:01:00+00:00", "billing")

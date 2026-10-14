@@ -81,8 +81,8 @@ function RepoCard({
 }
 
 function AppCard({
-  app, active, onSelect, onDelete,
-}: { app: Application; active: boolean; onSelect: () => void; onDelete: () => void }) {
+  app, active, onSelect, onDelete, canConfigure, canRemove,
+}: { app: Application; active: boolean; onSelect: () => void; onDelete: () => void; canConfigure: boolean; canRemove: boolean }) {
   return (
     <div
       role="button"
@@ -105,8 +105,8 @@ function AppCard({
         <span className="chip">{app.default_persona ? `persona · ${app.default_persona}` : 'persona · auto'}</span>
       </div>
       <div style={{ display: 'flex', gap: 14, fontSize: 12, fontWeight: 700 }}>
-        <Link href="/config" className="link-btn" onClick={(e) => { e.stopPropagation(); onSelect(); }}>Configure →</Link>
-        {!app.is_default && (
+        {canConfigure && <Link href="/config" className="link-btn" onClick={(e) => { e.stopPropagation(); onSelect(); }}>Configure →</Link>}
+        {!app.is_default && canRemove && (
           <button
             className="link-btn"
             style={{ border: 0, background: 'none', padding: 0, color: 'var(--color-red)', marginLeft: 'auto' }}
@@ -195,7 +195,7 @@ function OnboardModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
             <input className="input-main" value={form.description} onChange={set('description')} placeholder="What this application does" />
           </div>
 
-          <div className="form-section-label">Ticket board</div>
+          <div className="form-section-label">Configuration</div>
           <div style={{ gridColumn: '1 / -1' }}>
             <div className="segmented">
               {(['ado', 'jira'] as const).map((p) => (
@@ -284,7 +284,9 @@ function OnboardModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
 function ApplicationsContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { apps, activeApp, activeAppId, setActiveAppId, refreshApps } = useActiveApp();
+  const { apps, activeApp, activeAppId, setActiveAppId, refreshApps, me, can } = useActiveApp();
+  const isAdmin = can('admin');
+  const canPickRepo = can('maintainer');
   const [user, setUser] = useState<GithubUser | null | undefined>(undefined);
   const [repos, setRepos] = useState<GithubRepo[]>([]);
   const [loadingRepos, setLoadingRepos] = useState(false);
@@ -295,8 +297,8 @@ function ApplicationsContent() {
   const [onboarding, setOnboarding] = useState(false);
 
   useEffect(() => {
-    if (searchParams.get('onboard') === '1') setOnboarding(true);
-  }, [searchParams]);
+    if (searchParams.get('onboard') === '1' && isAdmin) setOnboarding(true);
+  }, [searchParams, isAdmin]);
 
   const closeOnboarding = () => {
     setOnboarding(false);
@@ -383,7 +385,7 @@ function ApplicationsContent() {
           eyebrow="Onboarding"
           title="Applications"
           description="Every team or project gets its own application — its own ticket board, repository, and defaults. Runs always use the active application's settings."
-          actions={<button className="btn-primary" onClick={() => setOnboarding(true)}>＋ Onboard application</button>}
+          actions={isAdmin ? <button className="btn-primary" onClick={() => setOnboarding(true)}>＋ Onboard application</button> : undefined}
         />
 
         {error && <div className="alert error">{error}</div>}
@@ -401,11 +403,15 @@ function ApplicationsContent() {
               active={app.id === activeAppId}
               onSelect={() => setActiveAppId(app.id)}
               onDelete={() => handleDelete(app)}
+              canConfigure={canPickRepo}
+              canRemove={isAdmin}
             />
           ))}
-          <button className="card-main app-card add" onClick={() => setOnboarding(true)}>
-            ＋ Onboard application
-          </button>
+          {isAdmin && (
+            <button className="card-main app-card add" onClick={() => setOnboarding(true)}>
+              ＋ Onboard application
+            </button>
+          )}
         </div>
 
         <div className="section-title" id="repositories">
@@ -414,6 +420,10 @@ function ApplicationsContent() {
             <p>Click a repository to point the active application at it. Runs clone, push, and open pull requests there.</p>
           </div>
         </div>
+
+        {me && !canPickRepo && (
+          <div className="locked-note" style={{ marginBottom: 16 }}>🔒 Changing an application&apos;s repository needs <b>maintainer</b> or higher. Your role is <b>{me.role}</b>.</div>
+        )}
 
         {user === undefined ? (
           <div style={{ color: 'var(--color-text-muted)', fontSize: 14 }}>Loading...</div>
@@ -475,7 +485,7 @@ function ApplicationsContent() {
                     repo={repo}
                     active={repo.full_name === activeApp?.target_repo}
                     selecting={selecting === repo.full_name}
-                    onSelect={() => handleSelect(repo)}
+                    onSelect={() => { if (canPickRepo) handleSelect(repo); }}
                   />
                 ))}
               </div>

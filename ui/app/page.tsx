@@ -114,7 +114,9 @@ export default function DashboardPage() {
   const providerKey = config ? config.TICKET_PROVIDER || 'jira' : '';
   const provider = providerKey === 'ado' ? 'Azure DevOps' : providerKey === 'jira' ? 'Jira' : '—';
   const ticketSecretSet = providerKey === 'ado' ? secrets?.ADO_PAT.set : secrets?.JIRA_API_TOKEN.set;
-  const fullyConfigured = !!(config && config.TARGET_REPO && secrets?.GITHUB_TOKEN.set && secrets?.AZURE_OPENAI_API_KEY.set && ticketSecretSet);
+  // Viewers/runners aren't told which tokens are set — judge them on the non-secret settings only.
+  const secretsOk = secrets === null || !!(secrets?.GITHUB_TOKEN.set && secrets?.AZURE_OPENAI_API_KEY.set && ticketSecretSet);
+  const fullyConfigured = !!(config && config.TARGET_REPO && secretsOk);
 
   return (
     <div className="bg-bg min-h-screen">
@@ -211,7 +213,7 @@ export default function DashboardPage() {
                         {ticketLabel(run.ticket_key)}{summary ? ` · ${summary}` : ''}
                       </b>
                       <span className="meta">
-                        {persona ? `${persona} · ` : ''}{formatTime(run.started_at)} · {formatDuration(run.duration_sec)}
+                        {persona ? `${persona} · ` : ''}{run.triggered_by ? `by @${run.triggered_by} · ` : ''}{formatTime(run.started_at)} · {formatDuration(run.duration_sec)}
                       </span>
                     </div>
                     <StatusBadge status={run.status} />

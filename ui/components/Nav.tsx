@@ -3,13 +3,13 @@
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
-import { getGithubUser, getStats, logoutGithub, type GithubUser } from '@/lib/api';
+import { getStats, logoutGithub, type Role } from '@/lib/api';
 import { useActiveApp } from '@/components/AppContext';
 
 export const appInitials = (name: string) =>
   name.split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]).join('').toUpperCase() || 'A';
 
-const NAV_ITEMS = [
+const NAV_ITEMS: Array<{ label: string; href: string; icon: string; color: string; minRole?: Role }> = [
   { label: 'Dashboard', href: '/', icon: 'home', color: '#7c3aed' },
   { label: 'Applications', href: '/applications', icon: 'github', color: '#0ea5e9' },
   { label: 'Run', href: '/run', icon: 'play', color: '#10b981' },
@@ -17,7 +17,9 @@ const NAV_ITEMS = [
   { label: 'Logs', href: '/logs', icon: 'file', color: '#3b82f6' },
   { label: 'Skills', href: '/skills', icon: 'award', color: '#ec4899' },
   { label: 'Config', href: '/config', icon: 'settings', color: '#f97316' },
-] as const;
+  { label: 'Activity', href: '/activity', icon: 'activity', color: '#14b8a6', minRole: 'maintainer' },
+  { label: 'Users', href: '/users', icon: 'users', color: '#6366f1', minRole: 'admin' },
+];
 
 const STROKE = {
   viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor',
@@ -42,6 +44,10 @@ function NavIcon({ name }: { name: string }) {
       return <svg {...STROKE}><path d="M4 19V9M10 19V5M16 19v-7M22 19V3" /></svg>;
     case 'award':
       return <svg {...STROKE}><circle cx="12" cy="8" r="6" /><polyline points="8.21 13.89 7 23 12 20 17 23 15.79 13.88" /></svg>;
+    case 'activity':
+      return <svg {...STROKE}><path d="M12 8v4l3 2" /><circle cx="12" cy="12" r="9" /></svg>;
+    case 'users':
+      return <svg {...STROKE}><circle cx="9" cy="8" r="4" /><path d="M2 21a7 7 0 0 1 14 0" /><path d="M16 4a4 4 0 0 1 0 8M22 21a7 7 0 0 0-4-6.3" /></svg>;
     case 'settings':
       return (
         <svg {...STROKE}>
@@ -61,8 +67,7 @@ export default function Nav() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [switcherOpen, setSwitcherOpen] = useState(false);
-  const { apps, activeApp, activeAppId, setActiveAppId } = useActiveApp();
-  const [githubUser, setGithubUser] = useState<GithubUser | null>(null);
+  const { apps, activeApp, activeAppId, setActiveAppId, me: githubUser, can } = useActiveApp();
   const [backendUp, setBackendUp] = useState<boolean | null>(null);
   const [query, setQuery] = useState('');
   const searchRef = useRef<HTMLInputElement>(null);
@@ -70,7 +75,6 @@ export default function Nav() {
 
   useEffect(() => {
     setDark(document.documentElement.classList.contains('dark'));
-    getGithubUser().then(setGithubUser);
   }, []);
 
   useEffect(() => {
@@ -203,7 +207,7 @@ export default function Nav() {
                   </button>
                 ))}
                 <div className="app-menu-divider" />
-                <Link href="/applications?onboard=1" onClick={() => setSwitcherOpen(false)}>＋ Onboard application</Link>
+                {can('admin') && <Link href="/applications?onboard=1" onClick={() => setSwitcherOpen(false)}>＋ Onboard application</Link>}
                 <Link href="/applications" onClick={() => setSwitcherOpen(false)}>Manage applications</Link>
               </div>
             )}
@@ -228,6 +232,7 @@ export default function Nav() {
               <div className="account-menu-head">
                 <small>Signed in with GitHub</small>
                 <b>{githubUser ? `@${githubUser.login}` : 'Unknown user'}</b>
+                {githubUser && <span className={`role-badge ${githubUser.role}`}>{githubUser.role}</span>}
               </div>
               <Link href="/applications" onClick={() => setMenuOpen(false)}>Manage applications</Link>
               <button onClick={handleLogout}>Log out</button>
@@ -245,7 +250,7 @@ export default function Nav() {
         </Link>
 
         <nav className="sidebar-nav">
-          {NAV_ITEMS.map(({ label, href, icon, color }) => (
+          {NAV_ITEMS.filter((item) => !item.minRole || can(item.minRole)).map(({ label, href, icon, color }) => (
             <Link
               key={href}
               href={href}

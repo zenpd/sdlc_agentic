@@ -84,7 +84,8 @@ const NO_SECRETS: Record<string, SecretState> = Object.fromEntries(SECRET_KEYS.m
 type Scope = 'app' | 'server';
 
 export default function ConfigPage() {
-  const { activeApp, activeAppId, refreshApps } = useActiveApp();
+  const { activeApp, activeAppId, refreshApps, me, can } = useActiveApp();
+  const canEdit = can('maintainer');
   const [scope, setScope] = useState<Scope>('app');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -114,7 +115,7 @@ export default function ConfigPage() {
         setProvider(((c.values.TICKET_PROVIDER || c.inherited.TICKET_PROVIDER || 'jira') as 'jira' | 'ado'));
         setFields(Object.fromEntries([...SETTING_KEYS, ...APP_DEFAULT_KEYS].map((k) => [k, c.values[k] ?? ''])));
         setInherited(c.inherited);
-        setSecretState(c.secrets);
+        setSecretState(c.secrets ?? NO_SECRETS);
       } else {
         const c = await getConfig();
         if (seq !== requestSeq.current) return;
@@ -131,10 +132,15 @@ export default function ConfigPage() {
   }, [scope, activeAppId]);
 
   useEffect(() => {
+    if (!me) return;
+    if (!canEdit) { setLoading(false); return; }
     setLoading(true);
     setSaved(false);
     refresh().finally(() => setLoading(false));
-  }, [refresh]);
+  }, [refresh, me, canEdit]);
+
+  // Server defaults affect every application, so only admins may save them.
+  const canSave = scope === 'server' ? can('admin') : canEdit;
 
   const setField = (key: string) => (v: string) => setFields((f) => ({ ...f, [key]: v }));
   const setSecret = (key: string) => (v: string) => setSecrets((s) => ({ ...s, [key]: v }));
@@ -187,9 +193,9 @@ export default function ConfigPage() {
               {saved && <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--color-green)' }}>✓ Saved</span>}
               <button
                 onClick={handleSave}
-                disabled={saving || loading}
+                disabled={saving || loading || !canSave}
                 className="btn-primary"
-                style={{ opacity: saving || loading ? 0.5 : 1 }}
+                style={{ opacity: saving || loading || !canSave ? 0.5 : 1 }}
               >
                 {saving ? 'Saving…' : 'Save changes'}
               </button>
@@ -203,8 +209,13 @@ export default function ConfigPage() {
         </div>
 
         {error && <div className="alert error">{error}</div>}
+        {canEdit && !canSave && (
+          <div className="locked-note" style={{ marginBottom: 16 }}>🔒 Server defaults apply to every application — only <b>admins</b> can save them. You can still view them.</div>
+        )}
 
-        {loading ? (
+        {me && !canEdit ? (
+          <div className="locked-note">🔒 Configuration is managed by <b>maintainers and admins</b>. Your role is <b>{me.role}</b>.</div>
+        ) : loading ? (
           <div style={{ color: 'var(--color-text-muted)', fontSize: 14 }}>Loading...</div>
         ) : (
           <>

@@ -76,7 +76,8 @@ export default function RunPage() {
   const [error, setError]       = useState<string | null>(null);
   const [running, setRunning]   = useState(false);
   const [elapsed, setElapsed]   = useState(0);
-  const { activeApp, activeAppId } = useActiveApp();
+  const { activeApp, activeAppId, me, can } = useActiveApp();
+  const canRun = can('runner');
 
   const intervalRef   = useRef<ReturnType<typeof setInterval> | null>(null);
   const timerRef      = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -169,8 +170,8 @@ export default function RunPage() {
             <button
               className="btn-primary"
               onClick={handleRun}
-              disabled={running || !ticketKey.trim()}
-              style={running ? { opacity: 0.5, pointerEvents: 'none', cursor: 'not-allowed' } : {}}
+              disabled={running || !ticketKey.trim() || !canRun}
+              style={running || !canRun ? { opacity: 0.5, pointerEvents: 'none', cursor: 'not-allowed' } : {}}
             >
               {running ? (
                 <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -190,6 +191,7 @@ export default function RunPage() {
               <span className="chip">{activeApp.default_persona ? `persona · ${activeApp.default_persona}` : 'persona · auto'}</span>
             </div>
           )}
+          {me && !canRun && <div className="locked-note" style={{ marginTop: 14 }}>🔒 Your role is <b>{me.role}</b> — starting runs needs <b>runner</b> or higher. Ask an admin.</div>}
           {error && <p style={{ marginTop: 12, color: 'var(--color-red)', fontSize: 13 }}>{error}</p>}
         </div>
 

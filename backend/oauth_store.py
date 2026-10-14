@@ -13,6 +13,10 @@ from typing import Optional
 DB_PATH = Path(__file__).parent / "runs.db"
 _lock = threading.Lock()
 
+# A session stops working server-side after this long, matching the cookie's
+# max-age, so an old cookie copied off a laptop can't be replayed forever.
+SESSION_MAX_AGE_SEC = 60 * 60 * 24 * 30
+
 
 def _get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -54,7 +58,9 @@ def create_session(access_token: str, github_login: str, avatar_url: Optional[st
 def get_session(session_id: str) -> Optional[dict]:
     conn = _get_conn()
     row = conn.execute(
-        "SELECT * FROM github_sessions WHERE session_id = ?", (session_id,)
+        "SELECT * FROM github_sessions WHERE session_id = ? "
+        "AND created_at >= datetime('now', ?)",
+        (session_id, f"-{SESSION_MAX_AGE_SEC} seconds"),
     ).fetchone()
     conn.close()
     return dict(row) if row else None

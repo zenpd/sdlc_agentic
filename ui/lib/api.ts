@@ -14,6 +14,7 @@ export type RunStatus = 'in-progress' | 'success' | 'failed' | 'error' | 'human'
 export type RunRecord = {
   id: string;
   app_id: string;
+  triggered_by: string | null;
   ticket_key: string;
   status: RunStatus;
   pr_url: string | null;
@@ -176,7 +177,8 @@ export type AppConfig = {
   values: Record<AppSettingKey, string>;
   inherited: Record<AppSettingKey, string>;
   effective: Record<AppSettingKey, string>;
-  secrets: Record<AppSecretKey, { set: boolean; inherited: boolean }>;
+  // null for viewers/runners — they don't get to know which tokens are set.
+  secrets: Record<AppSecretKey, { set: boolean; inherited: boolean }> | null;
 };
 
 export type AppConfigUpdate = Partial<Record<AppSettingKey | AppSecretKey, string>>;
@@ -218,9 +220,24 @@ export function updateAppConfig(appId: string, updates: AppConfigUpdate): Promis
 }
 
 // ── GitHub OAuth login + repo picker ─────────────────────────────────
+// Lowest to highest; each role can do everything the ones before it can.
+export const ROLES = ['viewer', 'runner', 'maintainer', 'admin'] as const;
+export type Role = typeof ROLES[number];
+
+export const ROLE_INFO: Record<Role, string> = {
+  viewer: 'Watch runs, logs, and dashboards',
+  runner: 'Viewer + start pipeline runs',
+  maintainer: 'Runner + edit application config, skills, and repositories',
+  admin: 'Everything, including onboarding applications, server defaults, and users',
+};
+
+export const hasRole = (role: Role | undefined, minimum: Role) =>
+  !!role && ROLES.indexOf(role) >= ROLES.indexOf(minimum);
+
 export type GithubUser = {
   login: string;
   avatar_url: string | null;
+  role: Role;
 };
 
 export type GithubRepo = {
@@ -255,6 +272,45 @@ export function selectGithubRepo(fullName: string, defaultBranch: string | undef
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ full_name: fullName, default_branch: defaultBranch, app_id: appId }),
   });
+}
+
+// ── Users, roles, audit log ──────────────────────────────────────────
+export type UserRecord = {
+  login: string;
+  avatar_url: string | null;
+  role: Role;
+  created_at: string;
+  last_login_at: string;
+};
+
+export type AuditEntry = {
+  id: number;
+  at: string;
+  actor: string;
+  action: string;
+  app_id: string | null;
+  target: string | null;
+  details: Record<string, any>;
+};
+
+export function listUsers(): Promise<UserRecord[]> {
+  return request<UserRecord[]>('/api/users');
+}
+
+export function updateUserRole(login: string, role: Role): Promise<UserRecord> {
+  return request<UserRecord>(`/api/users/${encodeURIComponent(login)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ role }),
+  });
+}
+
+export function getAudit(params: { appId?: string; actor?: string } = {}): Promise<AuditEntry[]> {
+  const q = new URLSearchParams();
+  if (params.appId) q.set('app_id', params.appId);
+  if (params.actor) q.set('actor', params.actor);
+  const qs = q.toString();
+  return request<AuditEntry[]>(`/api/audit${qs ? `?${qs}` : ''}`);
 }
 
 export function formatDuration(sec: number | null): string {

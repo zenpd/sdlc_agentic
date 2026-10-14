@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback } from 'react';
 import Nav from '@/components/Nav';
 import PageHeader from '@/components/PageHeader';
 import { listSkills, getSkill, saveSkill, type SkillSummary } from '@/lib/api';
+import { useActiveApp } from '@/components/AppContext';
 
 const STAGE_LABELS: Record<string, string> = {
   discovery: 'Discovery',
@@ -65,8 +66,11 @@ export default function SkillsPage() {
     setSaved(false);
   };
 
+  const { me, can } = useActiveApp();
+  const canEdit = can('maintainer');
+
   const handleSave = async () => {
-    if (!editingSlug) return;
+    if (!editingSlug || !canEdit) return;
     setSaving(true);
     setEditError(null);
     setSaved(false);
@@ -98,9 +102,9 @@ export default function SkillsPage() {
                   <button onClick={closeEditor} className="btn-secondary">← Back</button>
                   <button
                     onClick={handleSave}
-                    disabled={saving || editLoading}
+                    disabled={saving || editLoading || !canEdit}
                     className="btn-primary"
-                    style={{ opacity: saving || editLoading ? 0.5 : 1 }}
+                    style={{ opacity: saving || editLoading || !canEdit ? 0.5 : 1 }}
                   >
                     {saving ? 'Saving…' : 'Save changes'}
                   </button>
@@ -113,10 +117,14 @@ export default function SkillsPage() {
             ) : (
               <div className="card-main" style={{ padding: 22 }}>
                 {editError && <div className="alert error">{editError}</div>}
+                {me && !canEdit && (
+                  <div className="locked-note" style={{ marginBottom: 14 }}>🔒 Read-only — editing skills needs <b>maintainer</b> or higher. Your role is <b>{me.role}</b>.</div>
+                )}
                 <label className="label-main">SKILL.md (frontmatter + body)</label>
                 <textarea
                   value={editContent}
                   onChange={(e) => setEditContent(e.target.value)}
+                  readOnly={!canEdit}
                   className="input-main"
                   spellCheck={false}
                   style={{
