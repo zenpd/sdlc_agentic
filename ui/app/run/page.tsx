@@ -16,6 +16,7 @@ const STEPS: StepInfo[] = [
   { key: 'in_progress', label: 'Moving to In Progress', state: 'pending' },
   { key: 'gate', label: 'Clarity gate', state: 'pending' },
   { key: 'agent', label: 'Agent coding & testing', state: 'pending' },
+  { key: 'verify', label: 'Verification review', state: 'pending' },
   { key: 'pr', label: 'Opening PR', state: 'pending' },
   { key: 'jira', label: 'Updating Ticket', state: 'pending' },
 ];

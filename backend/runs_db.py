@@ -5,10 +5,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
+
 DB_PATH = Path(__file__).parent / "runs.db"
 _lock = threading.Lock()
 
-STEP_KEYS = ["fetch", "assign", "in_progress", "gate", "agent", "pr", "jira"]
+STEP_KEYS = ["fetch", "assign", "in_progress", "gate", "agent", "verify", "pr", "jira"]
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -33,11 +34,36 @@ def init_db() -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS webhook_deliveries (
+            app_id TEXT NOT NULL,
+            delivery_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            received_at TEXT NOT NULL,
+            PRIMARY KEY (app_id, delivery_id)
+        )
+        """
+    )
     # Every run belongs to an onboarded application (apps_store). Runs from
     # before applications existed belong to the "default" one.
     columns = {r["name"] for r in conn.execute("PRAGMA table_info(runs)").fetchall()}
     if "app_id" not in columns:
         conn.execute("ALTER TABLE runs ADD COLUMN app_id TEXT NOT NULL DEFAULT 'default'")
+    if "prompt_tokens" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN prompt_tokens INTEGER NOT NULL DEFAULT 0")
+    if "completion_tokens" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN completion_tokens INTEGER NOT NULL DEFAULT 0")
+    if "cost_usd" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN cost_usd REAL")
+    if "llm_request_count" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN llm_request_count INTEGER NOT NULL DEFAULT 0")
+    if "priced_request_count" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN priced_request_count INTEGER NOT NULL DEFAULT 0")
+    if "cost_status" not in columns:
+        conn.execute(
+            "ALTER TABLE runs ADD COLUMN cost_status TEXT NOT NULL DEFAULT 'unavailable'"
+        )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_app_started ON runs (app_id, started_at)")
     conn.commit()
     conn.close()
@@ -59,6 +85,80 @@ def create_run(run_id: str, ticket_key: str, started_at: str, app_id: str = "def
         )
         conn.commit()
         conn.close()
+
+
+def create_webhook_run(
+    run_id: str,
+    ticket_key: str,
+    started_at: str,
+    app_id: str,
+    delivery_id: str | None,
+) -> str:
+    """Atomically queue a webhook run and claim its delivery ID.
+
+    Returns ``queued``, ``duplicate_delivery``, or ``already_running``.
+    """
+    with _lock:
+        conn = _get_conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            if delivery_id is not None:
+                existing = conn.execute(
+                    """
+                    SELECT 1 FROM webhook_deliveries
+                    WHERE app_id = ? AND delivery_id = ?
+                    """,
+                    (app_id, delivery_id),
+                ).fetchone()
+                if existing:
+                    conn.rollback()
+                    return "duplicate_delivery"
+
+            active = conn.execute(
+                """
+                SELECT id FROM runs
+                WHERE app_id = ? AND ticket_key = ? AND status = 'in-progress'
+                LIMIT 1
+                """,
+                (app_id, ticket_key),
+            ).fetchone()
+            if active:
+                if delivery_id is not None:
+                    conn.execute(
+                        """
+                        INSERT INTO webhook_deliveries
+                            (app_id, delivery_id, run_id, received_at)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (app_id, delivery_id, active["id"], started_at),
+                    )
+                conn.commit()
+                return "already_running"
+
+            steps = [{"key": key, "label": key, "state": "pending"} for key in STEP_KEYS]
+            conn.execute(
+                """
+                INSERT INTO runs
+                    (id, ticket_key, status, pr_url, started_at, duration_sec, steps, logs, app_id)
+                VALUES (?, ?, 'in-progress', NULL, ?, NULL, ?, ?, ?)
+                """,
+                (run_id, ticket_key, started_at, json.dumps(steps), json.dumps({}), app_id),
+            )
+            if delivery_id is not None:
+                conn.execute(
+                    """
+                    INSERT INTO webhook_deliveries (app_id, delivery_id, run_id, received_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (app_id, delivery_id, run_id, started_at),
+                )
+            conn.commit()
+            return "queued"
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
 
 def update_step(run_id: str, step_key: str, state: str, log: Optional[str] = None) -> None:
@@ -87,11 +187,85 @@ def finish_run(run_id: str, status: str, pr_url: Optional[str], duration_sec: in
     with _lock:
         conn = _get_conn()
         conn.execute(
-            "UPDATE runs SET status = ?, pr_url = ?, duration_sec = ? WHERE id = ?",
+            """
+            UPDATE runs
+            SET status = ?, pr_url = ?, duration_sec = ?,
+                cost_status = CASE WHEN cost_status = 'pending'
+                                   THEN 'unavailable' ELSE cost_status END
+            WHERE id = ?
+            """,
             (status, pr_url, duration_sec, run_id),
         )
         conn.commit()
         conn.close()
+
+
+def record_usage(
+    run_id: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    cost_usd: float | None,
+    request_count: int,
+    priced_request_count: int,
+) -> None:
+    """Add one pipeline phase's LiteLLM metrics to its run totals."""
+    if min(prompt_tokens, completion_tokens, request_count, priced_request_count) < 0:
+        raise ValueError("Usage counters cannot be negative")
+    if priced_request_count > request_count:
+        raise ValueError("Priced request count cannot exceed request count")
+    if cost_usd is not None and cost_usd < 0:
+        raise ValueError("Cost cannot be negative")
+
+    with _lock:
+        conn = _get_conn()
+        try:
+            row = conn.execute(
+                "SELECT llm_request_count, priced_request_count, cost_usd "
+                "FROM runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"Run {run_id!r} does not exist")
+
+            requests_total = row["llm_request_count"] + request_count
+            priced_total = row["priced_request_count"] + priced_request_count
+            if requests_total == 0:
+                cost_status = "pending"
+            elif priced_total == 0:
+                cost_status = "unavailable"
+            elif priced_total < requests_total:
+                cost_status = "partial"
+            else:
+                cost_status = "estimated"
+
+            total_cost = row["cost_usd"]
+            if cost_usd is not None:
+                total_cost = (total_cost or 0.0) + cost_usd
+
+            conn.execute(
+                """
+                UPDATE runs
+                SET prompt_tokens = prompt_tokens + ?,
+                    completion_tokens = completion_tokens + ?,
+                    cost_usd = ?,
+                    llm_request_count = ?,
+                    priced_request_count = ?,
+                    cost_status = ?
+                WHERE id = ?
+                """,
+                (
+                    prompt_tokens,
+                    completion_tokens,
+                    total_cost,
+                    requests_total,
+                    priced_total,
+                    cost_status,
+                    run_id,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict:
@@ -103,6 +277,13 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
         "pr_url": row["pr_url"],
         "started_at": row["started_at"],
         "duration_sec": row["duration_sec"],
+        "prompt_tokens": row["prompt_tokens"],
+        "completion_tokens": row["completion_tokens"],
+        "total_tokens": row["prompt_tokens"] + row["completion_tokens"],
+        "cost_usd": row["cost_usd"],
+        "cost_status": row["cost_status"],
+        "llm_request_count": row["llm_request_count"],
+        "priced_request_count": row["priced_request_count"],
         "steps": json.loads(row["steps"]),
         "logs": json.loads(row["logs"]),
     }
@@ -146,6 +327,22 @@ def get_stats(app_id: Optional[str] = None) -> dict:
     ).fetchone()
     avg_duration_sec = int(avg_row["a"]) if avg_row["a"] is not None else None
 
+    current_month = datetime.now(timezone.utc).strftime("%Y-%m")
+    monthly_usage = conn.execute(
+        f"""
+        SELECT
+          SUM(cost_usd) cost,
+          SUM(prompt_tokens) prompt_tokens,
+          SUM(completion_tokens) completion_tokens,
+          SUM(CASE WHEN llm_request_count > 0 THEN 1 ELSE 0 END) usage_runs,
+          SUM(CASE WHEN cost_status IN ('partial', 'unavailable')
+                   AND llm_request_count > 0 THEN 1 ELSE 0 END) incomplete_runs
+        FROM runs
+        WHERE substr(started_at, 1, 7) = ?{where}
+        """,
+        (current_month, *params),
+    ).fetchone()
+
     daily = []
     today = datetime.now(timezone.utc).date()
     for i in range(6, -1, -1):
@@ -173,5 +370,10 @@ def get_stats(app_id: Optional[str] = None) -> dict:
         "human": human,
         "success_rate": success_rate,
         "avg_duration_sec": avg_duration_sec,
+        "monthly_cost_usd": monthly_usage["cost"],
+        "monthly_prompt_tokens": monthly_usage["prompt_tokens"] or 0,
+        "monthly_completion_tokens": monthly_usage["completion_tokens"] or 0,
+        "monthly_usage_runs": monthly_usage["usage_runs"] or 0,
+        "monthly_incomplete_cost_runs": monthly_usage["incomplete_runs"] or 0,
         "daily": daily,
     }

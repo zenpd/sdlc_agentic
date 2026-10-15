@@ -158,6 +158,15 @@ export default function DashboardPage() {
           </StatCard>
           <StatCard label="Needs human" value={stats ? String(stats.human) : '—'} tone="amber" icon="human" hint="Tickets handed back for clarification" />
           <StatCard label="Avg. delivery" value={stats ? formatDuration(stats.avg_duration_sec) : '—'} tone="pink" icon="clock" hint="Ticket → pull request" />
+          <StatCard
+            label="Estimated LLM cost this month"
+            value={stats?.monthly_cost_usd == null ? '—' : `$${stats.monthly_cost_usd.toFixed(5)}`}
+            tone="green"
+            icon="dollar"
+            hint={stats
+              ? `${stats.monthly_prompt_tokens.toLocaleString()} input · ${stats.monthly_completion_tokens.toLocaleString()} output tokens${stats.monthly_incomplete_cost_runs ? ` · ${stats.monthly_incomplete_cost_runs} run(s) with incomplete pricing` : ''}`
+              : 'Estimated from LiteLLM model pricing'}
+          />
         </section>
 
         <section className="feature-strip">

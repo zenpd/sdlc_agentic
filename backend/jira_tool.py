@@ -1,4 +1,5 @@
 import os
+import re
 from collections.abc import Sequence
 from typing import Literal
 
@@ -16,8 +17,38 @@ from openhands.sdk.logger import get_logger
 
 logger = get_logger(__name__)
 
+_ISSUE_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*-\d+$")
+
 
 ENV_VARS = {"JIRA_BASE_URL", "JIRA_USER_EMAIL", "JIRA_API_TOKEN"}
+
+
+def jira_ticket_matches_jql(
+    *,
+    base_url: str,
+    user_email: str,
+    api_token: str,
+    jql: str,
+    ticket_key: str,
+) -> bool:
+    """Return whether this Jira ticket satisfies an app's configured JQL."""
+    if not _ISSUE_KEY_RE.fullmatch(ticket_key):
+        raise ValueError("Invalid Jira issue key")
+    if not jql.strip():
+        raise ValueError("No Jira JQL is configured for this application")
+
+    query = re.sub(
+        r"\s+ORDER\s+BY\b.*$",
+        "",
+        jql.strip(),
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not query:
+        raise ValueError("The configured Jira JQL has no filter clause")
+    jql_for_ticket = f"({query}) AND key = {ticket_key}"
+    jira = JIRA(server=base_url, basic_auth=(user_email, api_token))
+    issues = jira.search_issues(jql_for_ticket, maxResults=1, fields="key")
+    return any(issue.key == ticket_key for issue in issues)
 
 
 class JiraAction(Action):
