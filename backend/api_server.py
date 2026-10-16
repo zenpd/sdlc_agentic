@@ -20,6 +20,7 @@ from backend import (
     config_store,
     notifications,
     oauth_store,
+    repo_suggest,
     run_events,
     runs_db,
     skills_store,
@@ -739,6 +740,17 @@ def get_app_config(app_id: str, user: dict = viewer):
     if not users_store.has_role(user, "maintainer"):
         cfg["secrets"] = None  # viewers/runners don't even learn which tokens are set
     return cfg
+
+
+@app.get("/api/apps/{app_id}/suggestions")
+def get_app_suggestions(app_id: str, user: dict = maintainer):
+    """Suggested test command / CI workflow / protected paths, detected from
+    the application's target repository."""
+    _check_app_access(user, app_id)
+    settings = apps_store.resolve_settings(app_id)
+    return repo_suggest.suggest_for_repo(
+        settings.get("GITHUB_TOKEN", ""), settings.get("TARGET_REPO", ""), settings.get("TARGET_BRANCH", ""),
+    )
 
 
 @app.put("/api/apps/{app_id}/config")

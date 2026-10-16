@@ -358,6 +358,23 @@ export function getAppConfig(appId: string): Promise<AppConfig> {
   return request<AppConfig>(`/api/apps/${encodeURIComponent(appId)}/config`);
 }
 
+// Settings suggested from the application's repository (Config page pre-fill).
+export type AppSuggestions = {
+  repo: string;
+  branch: string;
+  source: 'repo' | 'generic';
+  reason: string | null;
+  stack: string | null;
+  test_command: string;
+  setup_command: string;
+  ci_workflows: string[];
+  protected_paths: string[];
+};
+
+export function getAppSuggestions(appId: string): Promise<AppSuggestions> {
+  return request<AppSuggestions>(`/api/apps/${encodeURIComponent(appId)}/suggestions`);
+}
+
 export function updateAppConfig(appId: string, updates: AppConfigUpdate): Promise<AppConfig> {
   return request<AppConfig>(`/api/apps/${encodeURIComponent(appId)}/config`, {
     method: 'PUT',

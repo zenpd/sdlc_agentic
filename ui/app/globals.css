@@ -312,7 +312,12 @@ html.dark .btn-danger { background: transparent; border-color: #6b2a31; }
   transition: transform .2s ease, box-shadow .2s ease, opacity .2s;
 }
 .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 11px 24px rgba(23,112,193,.32); }
-.btn-primary:disabled { cursor: not-allowed; transform: none; }
+.btn-primary:disabled { cursor: not-allowed; transform: none; opacity: .45; box-shadow: none; filter: saturate(.6); }
+.btn-secondary:disabled, .btn-danger:disabled { cursor: not-allowed; opacity: .5; }
+.btn-secondary:disabled:hover { border-color: var(--color-border-strong); color: #435067; }
+html.dark .btn-secondary:disabled:hover { color: #c3cee2; }
+.btn-danger:disabled:hover { background: #fff; }
+html.dark .btn-danger:disabled:hover { background: transparent; }
 .btn-primary svg { width: 16px; height: 16px; }
 
 .btn-secondary {

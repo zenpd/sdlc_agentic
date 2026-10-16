@@ -5,8 +5,8 @@ import Nav from '@/components/Nav';
 import PageHeader from '@/components/PageHeader';
 import { useActiveApp } from '@/components/AppContext';
 import {
-  getConfig, updateConfig, getAppConfig, updateAppConfig, listSkills, updateApp,
-  type ConfigUpdate, type AppConfigUpdate, type SkillSummary,
+  getConfig, updateConfig, getAppConfig, updateAppConfig, listSkills, updateApp, getAppSuggestions,
+  type ConfigUpdate, type AppConfigUpdate, type SkillSummary, type AppSuggestions,
 } from '@/lib/api';
 
 type FieldProps = {
@@ -140,6 +140,55 @@ export default function ConfigPage() {
   const [inherited, setInherited] = useState<Record<string, string> | null>(null);
   const [secretState, setSecretState] = useState<Record<string, SecretState>>(NO_SECRETS);
   const [secrets, setSecrets] = useState<Record<string, string>>(EMPTY_SECRETS);
+
+  // Suggestions detected from this app's repository, fetched the first time
+  // someone picks a verification mode or turns on approval.
+  const [suggestions, setSuggestions] = useState<AppSuggestions | null>(null);
+  const suggestionsFor = useRef<{ appId: string; promise: Promise<AppSuggestions | null> } | null>(null);
+  useEffect(() => { setSuggestions(null); suggestionsFor.current = null; }, [activeAppId]);
+
+  const loadSuggestions = () => {
+    if (suggestionsFor.current?.appId !== activeAppId) {
+      const appId = activeAppId;
+      suggestionsFor.current = {
+        appId,
+        promise: getAppSuggestions(appId)
+          .then((sg) => { if (suggestionsFor.current?.appId === appId) setSuggestions(sg); return sg; })
+          .catch(() => null),
+      };
+    }
+    return suggestionsFor.current.promise;
+  };
+
+  // Pre-fill only fields that are still empty — never overwrite what someone typed.
+  const fillEmpty = (values: Record<string, string>) =>
+    setFields((f) => {
+      const next = { ...f };
+      for (const [k, v] of Object.entries(values)) if (v && !(f[k] || '').trim()) next[k] = v;
+      return next;
+    });
+
+  const onVerifyMode = (mode: string) => {
+    setField('VERIFY_MODE')(mode);
+    if (mode === 'command') {
+      fillEmpty({ TEST_TIMEOUT_MIN: '10' });
+      loadSuggestions().then((sg) => sg && fillEmpty({ TEST_COMMAND: sg.test_command }));
+    } else if (mode === 'github_actions') {
+      fillEmpty({ TEST_TIMEOUT_MIN: '20' });
+      loadSuggestions();
+    }
+  };
+
+  const onApproval = (value: string) => {
+    setField('REQUIRE_PR_APPROVAL')(value);
+    if (value === 'true') {
+      loadSuggestions().then((sg) => sg && fillEmpty({ PROTECTED_PATHS: sg.protected_paths.join('\n') }));
+    }
+  };
+
+  const detectedNote = suggestions && (suggestions.stack
+    ? `Detected ${suggestions.stack} · ${suggestions.repo.split('/').pop()}@${suggestions.branch}`
+    : suggestions.reason || `Couldn't recognise the stack of ${suggestions.repo || 'this repository'} — enter the command yourself`);
 
   useEffect(() => {
     listSkills(undefined, activeAppId)
@@ -391,7 +440,7 @@ export default function ConfigPage() {
               <Section title="Verification — tests & CI">
                 <div>
                   <label className="label-main">How to verify the agent&apos;s change</label>
-                  <select className="input-main" value={fields.VERIFY_MODE || ''} onChange={(e) => setField('VERIFY_MODE')(e.target.value)}>
+                  <select className="input-main" value={fields.VERIFY_MODE || ''} onChange={(e) => onVerifyMode(e.target.value)}>
                     <option value="">Review the diff only (no automated tests)</option>
                     <option value="command">Run a test command before the PR</option>
                     <option value="github_actions">Wait for GitHub Actions on the PR</option>
@@ -401,15 +450,35 @@ export default function ConfigPage() {
                       : fields.VERIFY_MODE === 'github_actions' ? 'A failing check hands the ticket back, with the PR link'
                       : 'The PR says honestly that nothing was tested'}
                   </div>
+                  {fields.VERIFY_MODE && detectedNote && <div className="field-hint">🔎 {detectedNote}</div>}
                 </div>
                 {fields.VERIFY_MODE === 'command' && (
                   <>
-                    <Field label="Setup command (optional)" value={fields.TEST_SETUP_COMMAND || ''} onChange={setField('TEST_SETUP_COMMAND')} placeholder="pip install -r requirements.txt" />
+                    <div>
+                      <Field label="Setup command (optional)" value={fields.TEST_SETUP_COMMAND || ''} onChange={setField('TEST_SETUP_COMMAND')} placeholder={suggestions?.setup_command || 'pip install -r requirements.txt'} />
+                      {suggestions?.setup_command && !fields.TEST_SETUP_COMMAND && (
+                        <div className="field-hint" title="Not filled in automatically — it installs packages on the pipeline server">
+                          <button type="button" className="link-btn" onClick={() => setField('TEST_SETUP_COMMAND')(suggestions.setup_command)}>Use</button>{' '}
+                          <code>{suggestions.setup_command}</code>
+                        </div>
+                      )}
+                    </div>
                     <Field label="Test command" value={fields.TEST_COMMAND || ''} onChange={setField('TEST_COMMAND')} placeholder="pytest -q   ·   npm test" />
                   </>
                 )}
                 {fields.VERIFY_MODE === 'github_actions' && (
-                  <Field label="Workflow to trigger (optional)" value={fields.CI_WORKFLOW || ''} onChange={setField('CI_WORKFLOW')} placeholder="ci.yml — blank = wait for push/PR checks" />
+                  <div>
+                    <Field label="Workflow to trigger (optional)" value={fields.CI_WORKFLOW || ''} onChange={setField('CI_WORKFLOW')} placeholder="ci.yml — blank = wait for push/PR checks" />
+                    {suggestions && (
+                      <div className="field-hint">
+                        {suggestions.ci_workflows.length
+                          ? <>Workflows in the repo: {suggestions.ci_workflows.map((w, i) => (
+                              <span key={w}>{i > 0 && ', '}<button type="button" className="link-btn" onClick={() => setField('CI_WORKFLOW')(w)}>{w}</button></span>
+                            ))} — only pick one that has a workflow_dispatch trigger</>
+                          : 'No workflows found in .github/workflows — this repo has no GitHub Actions to wait for'}
+                      </div>
+                    )}
+                  </div>
                 )}
                 {fields.VERIFY_MODE && (
                   <Field label="Timeout (minutes)" value={fields.TEST_TIMEOUT_MIN || ''} onChange={setField('TEST_TIMEOUT_MIN')} placeholder="10" />
@@ -449,7 +518,7 @@ export default function ConfigPage() {
               <Section title="Governance">
                 <div>
                   <label className="label-main">Approval before pull request</label>
-                  <select className="input-main" value={fields.REQUIRE_PR_APPROVAL || ''} onChange={(e) => setField('REQUIRE_PR_APPROVAL')(e.target.value)}>
+                  <select className="input-main" value={fields.REQUIRE_PR_APPROVAL || ''} onChange={(e) => onApproval(e.target.value)}>
                     <option value="">Not required (default)</option>
                     <option value="true">Required — a maintainer must approve</option>
                     <option value="false">Not required</option>
@@ -467,6 +536,14 @@ export default function ConfigPage() {
                     style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5, resize: 'vertical' }}
                   />
                   <div className="field-hint">One pattern per line or comma-separated. A run that touches one is stopped before anything is pushed.</div>
+                  {fields.REQUIRE_PR_APPROVAL === 'true' && suggestions && (
+                    <div className="field-hint">
+                      🔎 Suggested from {suggestions.repo || 'the repository'}: <code>{suggestions.protected_paths.join(', ')}</code>
+                      {(fields.PROTECTED_PATHS || '').trim() !== suggestions.protected_paths.join('\n') && (
+                        <> · <button type="button" className="link-btn" onClick={() => setField('PROTECTED_PATHS')(suggestions.protected_paths.join('\n'))}>Use these</button></>
+                      )}
+                    </div>
+                  )}
                 </div>
               </Section>
             )}

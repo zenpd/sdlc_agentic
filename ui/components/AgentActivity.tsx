@@ -269,7 +269,7 @@ export default function AgentActivity({
   const modifiedFiles = modifiedLine ? modifiedLine.replace('Modified:', '').split(',').map((s) => s.trim()).filter(Boolean) : [];
   const failLine = agentState === 'failed' || agentState === 'human' ? plainLines[plainLines.length - 1] : null;
   // "[TESTS] ✓ pytest -q passed (12s)" / "[TESTS] ✗ Tests failed …" from the app's own test command
-  const testLine = [...plainLines].reverse().find((l) => /^\[TESTS\] [✓✗]/.test(l)) ?? null;
+  const testLine = [...plainLines, ...(logs.verify ?? [])].reverse().find((l) => /^\[TESTS\] [✓✗]/.test(l)) ?? null;
   const testsPassed = testLine?.startsWith('[TESTS] ✓') ?? false;
 
   const needsHuman = gateState === 'human'
@@ -462,7 +462,7 @@ export default function AgentActivity({
                 {testsPassed ? '✓ tests passed' : '✗ tests failed'}
               </div>
             )}
-            {(logs.verify ?? []).slice(-2).map((line, index) => (
+            {(logs.verify ?? []).filter((line) => !line.startsWith('[TESTS')).slice(-2).map((line, index) => (
               <div
                 key={`${index}-${line}`}
                 style={{

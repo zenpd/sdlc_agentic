@@ -1080,30 +1080,30 @@ def run_pipeline(
             f"Guardrail blocked this change — the agent modified protected path(s): {', '.join(violations)} "
             f"(policy for {cfg.app_name}: {', '.join(cfg.protected_paths)}). Nothing was pushed."
         )
-        log_event("agent", msg, "warning")
-        on_step("agent", "human", f"[GUARDRAIL] {msg}")
-        post_comment(msg, "agent", "human")
-        set_ticket_status(cfg.status_failed, "agent", "human")
+        log_event("verify", msg, "warning")
+        on_step("verify", "human", f"[GUARDRAIL] {msg}")
+        post_comment(msg, "verify", "human")
+        set_ticket_status(cfg.status_failed, "verify", "human")
         raise PipelineHalt("human", msg)
 
     # Point 11: the app's own test command is the real gate — the agent
     # saying "done" isn't enough.
     verification = "none configured for this application — review the diff."
     if cfg.verify_mode == "command":
-        on_step("agent", "in-progress", f"[TESTS] Running {cfg.test_command}")
+        on_step("verify", "in-progress", f"[TESTS] Running {cfg.test_command}")
         t0 = time.monotonic()
         rc_tests, test_out = run_shell(cfg.test_command, repo_dir, test_timeout_sec)
         took = f"{time.monotonic() - t0:.0f}s"
         if rc_tests != 0:
             why = f"timed out after {cfg.test_timeout_min} min" if rc_tests is None else f"failed (exit code {rc_tests})"
             msg = f"Tests {why}: `{cfg.test_command}`. Nothing was pushed."
-            log_event("agent", msg, "warning")
-            on_step("agent", "human", f"[TESTS-OUTPUT]\n{_tail(test_out)}")
-            on_step("agent", "human", f"[TESTS] ✗ {msg}")
-            post_comment(f"{msg}\n\nLast lines of output:\n{_tail(test_out, 15)}", "agent", "human")
-            set_ticket_status(cfg.status_failed, "agent", "human")
+            log_event("verify", msg, "warning")
+            on_step("verify", "human", f"[TESTS-OUTPUT]\n{_tail(test_out)}")
+            on_step("verify", "human", f"[TESTS] ✗ {msg}")
+            post_comment(f"{msg}\n\nLast lines of output:\n{_tail(test_out, 15)}", "verify", "human")
+            set_ticket_status(cfg.status_failed, "verify", "human")
             raise PipelineHalt("human", msg)
-        on_step("agent", "in-progress", f"[TESTS] ✓ {cfg.test_command} passed ({took})")
+        on_step("verify", "in-progress", f"[TESTS] ✓ {cfg.test_command} passed ({took})")
         verification = f"`{cfg.test_command}` passed ({took})."
     elif cfg.verify_mode == "github_actions":
         verification = "GitHub Actions results are reported on this PR."
