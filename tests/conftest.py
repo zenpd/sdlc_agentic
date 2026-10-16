@@ -43,7 +43,8 @@ def sign_in(login: str, role: str | None = None) -> None:
 @pytest.fixture(autouse=True)
 def clean_state(monkeypatch):
     conn = apps_store._get_conn()
-    for table in ("applications", "runs", "users", "audit_log", "github_sessions", "teams", "team_members"):
+    for table in ("applications", "runs", "users", "audit_log", "github_sessions", "teams", "team_members",
+                  "run_events", "webhook_deliveries"):
         conn.execute(f"DROP TABLE IF EXISTS {table}")
     conn.commit()
     conn.close()

@@ -36,22 +36,56 @@ function Field({ label, value, onChange, placeholder, inherited, type = 'text' }
   );
 }
 
+function BooleanField({
+  label, value, inherited, defaultValue = false, onChange,
+}: {
+  label: string;
+  value: string;
+  inherited?: string;
+  defaultValue?: boolean;
+  onChange: (value: string) => void;
+}) {
+  const resolved = value || inherited || String(defaultValue);
+  return (
+    <label style={{ display: 'flex', alignItems: 'center', gap: 9, fontSize: 13 }}>
+      <input
+        type="checkbox"
+        checked={resolved.toLowerCase() === 'true'}
+        onChange={(e) => onChange(String(e.target.checked))}
+      />
+      <span>
+        {label}
+        {inherited !== undefined && !value && (
+          <span className="field-hint" style={{ display: 'block' }}>
+            {inherited ? 'Inherited from server defaults' : 'Using the built-in default'}
+          </span>
+        )}
+      </span>
+    </label>
+  );
+}
+
 type SecretState = { set: boolean; inherited?: boolean };
 
 function SecretField({
   label, state, value, onChange,
-}: { label: string; state: SecretState; value: string; onChange: (v: string) => void }) {
-  const note = !state.set ? null : state.inherited ? '· inherited from server' : '· configured';
+}: { label: string; state?: SecretState; value: string; onChange: (v: string) => void }) {
+  const configuredState = state ?? { set: false };
+  const note = !configuredState.set
+    ? null
+    : configuredState.inherited
+      ? '· inherited from server'
+      : '· configured';
   return (
     <div>
       <label className="label-main">
-        {label} {note && <span style={{ color: state.inherited ? 'var(--color-text-muted)' : 'var(--color-green)', fontWeight: 400 }}>{note}</span>}
+        {label} {note && <span style={{ color: configuredState.inherited ? 'var(--color-text-muted)' : 'var(--color-green)', fontWeight: 400 }}>{note}</span>}
       </label>
       <input
         className="input-main"
         type="password"
         value={value}
-        placeholder={state.set ? '•••••••• (leave blank to keep current value)' : 'Not set'}
+        placeholder={configuredState.set ? '•••••••• (leave blank to keep current value)' : 'Not set'}
         onChange={(e) => onChange(e.target.value)}
         autoComplete="new-password"
       />
@@ -73,13 +107,18 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 const SETTING_KEYS = [
   'JIRA_BASE_URL', 'JIRA_USER_EMAIL', 'ADO_ORG_URL', 'ADO_PROJECT',
   'TARGET_REPO', 'TARGET_BRANCH', 'AZURE_OPENAI_ENDPOINT', 'AZURE_OPENAI_DEPLOYMENT',
-  'STATUS_DONE', 'STATUS_IN_PROGRESS', 'STATUS_FAILED',
+  'STATUS_DONE', 'STATUS_IN_PROGRESS', 'STATUS_FAILED', 'NOTIFY_ON_SUCCESS', 'NOTIFY_ON_FAILURE',
+  'NOTIFY_EMAIL_TO', 'SMTP_HOST', 'SMTP_PORT', 'SMTP_FROM', 'SMTP_USERNAME', 'SMTP_STARTTLS',
 ] as const;
 const APP_DEFAULT_KEYS = [
   'DEFAULT_PERSONA', 'BRANCH_PREFIX', 'GATE_MIN_WORDS', 'REQUIRE_PR_APPROVAL', 'PROTECTED_PATHS',
   'VERIFY_MODE', 'TEST_SETUP_COMMAND', 'TEST_COMMAND', 'TEST_TIMEOUT_MIN', 'CI_WORKFLOW',
 ] as const;
-const SECRET_KEYS = ['JIRA_API_TOKEN', 'ADO_PAT', 'GITHUB_TOKEN', 'AZURE_OPENAI_API_KEY'] as const;
+const SECRET_KEYS = [
+  'JIRA_API_TOKEN', 'ADO_PAT', 'GITHUB_TOKEN', 'AZURE_OPENAI_API_KEY',
+  'SLACK_WEBHOOK_URL', 'TEAMS_WEBHOOK_URL', 'SMTP_PASSWORD', 'JIRA_WEBHOOK_TOKEN',
+  'ADO_WEBHOOK_TOKEN',
+] as const;
 
 const EMPTY_SECRETS: Record<string, string> = Object.fromEntries(SECRET_KEYS.map((k) => [k, '']));
 const NO_SECRETS: Record<string, SecretState> = Object.fromEntries(SECRET_KEYS.map((k) => [k, { set: false }]));
@@ -103,8 +142,10 @@ export default function ConfigPage() {
   const [secrets, setSecrets] = useState<Record<string, string>>(EMPTY_SECRETS);
 
   useEffect(() => {
-    listSkills().then((s) => setSkills(s.filter((k) => !k.error))).catch(() => {});
-  }, []);
+    listSkills(undefined, activeAppId)
+      .then((s) => setSkills(s.filter((k) => !k.error)))
+      .catch(() => {});
+  }, [activeAppId]);
 
   // Drops responses for a scope/app the user has already switched away from.
   const requestSeq = useRef(0);
@@ -246,6 +287,72 @@ export default function ConfigPage() {
                 </>
               )}
             </Section>
+
+            <Section title="Outbound notifications">
+              <BooleanField
+                label="Notify on successful runs"
+                value={fields.NOTIFY_ON_SUCCESS || ''}
+                inherited={inh('NOTIFY_ON_SUCCESS')}
+                onChange={setField('NOTIFY_ON_SUCCESS')}
+              />
+              <BooleanField
+                label="Notify on failed or paused runs"
+                value={fields.NOTIFY_ON_FAILURE || ''}
+                inherited={inh('NOTIFY_ON_FAILURE')}
+                onChange={setField('NOTIFY_ON_FAILURE')}
+              />
+              <SecretField label="Slack incoming webhook URL" state={secretState.SLACK_WEBHOOK_URL} value={secrets.SLACK_WEBHOOK_URL || ''} onChange={setSecret('SLACK_WEBHOOK_URL')} />
+              <SecretField label="Teams incoming webhook URL" state={secretState.TEAMS_WEBHOOK_URL} value={secrets.TEAMS_WEBHOOK_URL || ''} onChange={setSecret('TEAMS_WEBHOOK_URL')} />
+              <Field label="Email recipients (comma-separated)" value={fields.NOTIFY_EMAIL_TO || ''} onChange={setField('NOTIFY_EMAIL_TO')} inherited={inh('NOTIFY_EMAIL_TO')} placeholder="team@example.com" />
+              <Field label="SMTP host" value={fields.SMTP_HOST || ''} onChange={setField('SMTP_HOST')} inherited={inh('SMTP_HOST')} placeholder="smtp.example.com" />
+              <Field label="SMTP port" value={fields.SMTP_PORT || ''} onChange={setField('SMTP_PORT')} inherited={inh('SMTP_PORT')} placeholder="587" />
+              <Field label="Email sender address" value={fields.SMTP_FROM || ''} onChange={setField('SMTP_FROM')} inherited={inh('SMTP_FROM')} placeholder="sdlc-bot@example.com" />
+              <Field label="SMTP username (optional)" value={fields.SMTP_USERNAME || ''} onChange={setField('SMTP_USERNAME')} inherited={inh('SMTP_USERNAME')} />
+              <SecretField label="SMTP password (optional)" state={secretState.SMTP_PASSWORD} value={secrets.SMTP_PASSWORD || ''} onChange={setSecret('SMTP_PASSWORD')} />
+              <BooleanField
+                label="Use SMTP STARTTLS"
+                value={fields.SMTP_STARTTLS || ''}
+                inherited={inh('SMTP_STARTTLS')}
+                defaultValue
+                onChange={setField('SMTP_STARTTLS')}
+              />
+            </Section>
+
+            {scope === 'app' && provider === 'jira' && (
+              <Section title="Inbound Jira webhook">
+                <SecretField
+                  label="Webhook bearer token"
+                  state={secretState.JIRA_WEBHOOK_TOKEN}
+                  value={secrets.JIRA_WEBHOOK_TOKEN || ''}
+                  onChange={setSecret('JIRA_WEBHOOK_TOKEN')}
+                />
+                <div style={{ gridColumn: '1 / -1', fontSize: 12, color: 'var(--color-text-muted)' }}>
+                  Configure Jira Automation to POST the issue key to{' '}
+                  <code>/api/webhooks/jira/{activeAppId}</code> with the header{' '}
+                  <code>Authorization: Bearer &lt;token&gt;</code>. The token is stored
+                  as a secret and is never shown again. Jira must be able to reach
+                  this backend over HTTPS; localhost alone is not reachable from Jira.
+                </div>
+              </Section>
+            )}
+
+            {scope === 'app' && provider === 'ado' && (
+              <Section title="Inbound Azure DevOps webhook">
+                <SecretField
+                  label="Service Hook password"
+                  state={secretState.ADO_WEBHOOK_TOKEN}
+                  value={secrets.ADO_WEBHOOK_TOKEN || ''}
+                  onChange={setSecret('ADO_WEBHOOK_TOKEN')}
+                />
+                <div style={{ gridColumn: '1 / -1', fontSize: 12, color: 'var(--color-text-muted)' }}>
+                  Configure an Azure DevOps Web Hooks service-hook subscription for work-item
+                  created/updated events. Use URL <code>/api/webhooks/ado/{activeAppId}</code> and
+                  Basic authentication with username <code>sdlc-agentic</code> and the configured
+                  password. The app&apos;s WIQL is checked before a run starts. Azure DevOps must
+                  reach this backend over HTTPS; localhost alone is not reachable from Azure DevOps.
+                </div>
+              </Section>
+            )}
 
             <Section title="GitHub">
               <Field label="Default target repo" value={fields.TARGET_REPO || ''} onChange={setField('TARGET_REPO')} inherited={inh('TARGET_REPO')} placeholder="owner/repo" />

@@ -109,7 +109,8 @@ lines-after-imports = 2
 # backend/tests/ so `uv run pytest` is ready the moment tests are added there.
 [tool.pytest.ini_options]
 testpaths = [
-    "backend/tests"
+    "backend/tests",
+    "tests"
 ]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]

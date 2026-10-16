@@ -226,7 +226,7 @@ export default function AgentActivity({
     if (s === 'failed' || s === 'error') return 'failed';
     return 'pending';
   };
-  const [fetchState, , , gateState, agentState, prState] = stepStates.map(toNodeStatus);
+  const [fetchState, , , gateState, agentState, verifyState, prState] = stepStates.map(toNodeStatus);
 
   const fetchLine = logs.fetch?.[0] ?? '';
   const fetchMatch = fetchLine.match(/^(\S+):\s*(.*?)\s*\(persona:\s*([\w-]+)\)\s*$/);
@@ -272,11 +272,16 @@ export default function AgentActivity({
   const testLine = [...plainLines].reverse().find((l) => /^\[TESTS\] [✓✗]/.test(l)) ?? null;
   const testsPassed = testLine?.startsWith('[TESTS] ✓') ?? false;
 
-  const needsHuman = gateState === 'human' || agentState === 'human' || prState === 'human';
+  const needsHuman = gateState === 'human'
+    || agentState === 'human'
+    || verifyState === 'human'
+    || prState === 'human';
   const humanReason = gateState === 'human'
     ? (gateLine.replace(/^(YES|NO)\s*-\s*/, '') || 'The ticket description needs more detail before the agent can proceed.')
     : agentState === 'human'
     ? (plainLines[plainLines.length - 1] || 'The agent could not complete this ticket automatically.')
+    : verifyState === 'human'
+    ? ((logs.verify ?? []).slice(-1)[0] || 'Verification requires human review.')
     : prState === 'human'
     ? (prLogLines[prLogLines.length - 1] || 'The pipeline paused before opening a pull request.')
     : '';
@@ -446,15 +451,28 @@ export default function AgentActivity({
         <TraceConnector active={agentState === 'done'} color="#34d399" />
 
         <div style={{ display: 'flex', gap: 10, width: '100%' }}>
-          <TraceNode title="Verify" status={modifiedFiles.length > 0 ? 'done' : agentState === 'failed' ? 'failed' : agentState === 'human' ? 'human' : 'pending'} flex={1}>
+          <TraceNode title="Verify" status={verifyState} flex={1}>
             <div style={{ fontSize: 11, color: '#8a8aa8', fontFamily: 'var(--font-mono)' }}>
-              {modifiedFiles.length > 0 ? `${modifiedFiles.length} file${modifiedFiles.length > 1 ? 's' : ''} changed` : '—'}
+              {modifiedFiles.length > 0
+                ? `${modifiedFiles.length} file${modifiedFiles.length > 1 ? 's' : ''} changed`
+                : '—'}
             </div>
             {testLine && (
               <div title={testLine} style={{ marginTop: 4, fontSize: 11, fontFamily: 'var(--font-mono)', color: testsPassed ? '#34d399' : '#f59e0b', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                 {testsPassed ? '✓ tests passed' : '✗ tests failed'}
               </div>
             )}
+            {(logs.verify ?? []).slice(-2).map((line, index) => (
+              <div
+                key={`${index}-${line}`}
+                style={{
+                  marginTop: 4, fontSize: 10, color: '#c8c8dc',
+                  fontFamily: 'var(--font-mono)', overflowWrap: 'anywhere',
+                }}
+              >
+                {line}
+              </div>
+            ))}
           </TraceNode>
           <TraceNode title="Pull Request" status={prState} flex={1}>
             {prUrl ? (

@@ -18,6 +18,7 @@ export type RunApproval = {
   note: string | null;
   at: string | null;
 };
+export type CostStatus = 'pending' | 'estimated' | 'partial' | 'unavailable';
 
 export type RunRecord = {
   id: string;
@@ -28,6 +29,13 @@ export type RunRecord = {
   pr_url: string | null;
   started_at: string;
   duration_sec: number | null;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cost_usd: number | null;
+  cost_status: CostStatus;
+  llm_request_count: number;
+  priced_request_count: number;
   steps: StepInfo[];
   logs: Record<string, string[]>;
   approval: RunApproval | null;
@@ -40,6 +48,11 @@ export type RunStats = {
   human: number;
   success_rate: number;
   avg_duration_sec: number | null;
+  monthly_cost_usd: number | null;
+  monthly_prompt_tokens: number;
+  monthly_completion_tokens: number;
+  monthly_usage_runs: number;
+  monthly_incomplete_cost_runs: number;
   daily: Array<{ date: string; success: number; failed: number }>;
 };
 
@@ -100,6 +113,9 @@ export type SkillSummary = {
   description?: string;
   sdlc_stage?: string;
   keywords?: string[];
+  loads_in?: string[];
+  source?: 'shared' | 'app';
+  overrides_shared?: boolean;
   error?: string;
 };
 
@@ -108,28 +124,111 @@ export type SkillContent = {
   content: string;
 };
 
-export function listSkills(): Promise<SkillSummary[]> {
-  return request<SkillSummary[]>('/api/skills');
+export type SkillVersion = {
+  version_id: string;
+  saved_at: string;
+  size_bytes: number;
+};
+
+export type MarketplaceSkill = {
+  slug: string;
+  name: string;
+  description: string;
+  license: string;
+  is_installed: boolean;
+};
+
+export function listSkills(stage?: string, appId?: string): Promise<SkillSummary[]> {
+  const params = new URLSearchParams();
+  if (stage) params.set('stage', stage);
+  if (appId) params.set('app_id', appId);
+  const queryString = params.toString();
+  const query = queryString ? `?${queryString}` : '';
+  return request<SkillSummary[]>(`/api/skills${query}`);
 }
 
-export function getSkill(slug: string): Promise<SkillContent> {
-  return request<SkillContent>(`/api/skills/${slug}`);
+export function getStageMap(): Promise<Record<string, string[]>> {
+  return request<Record<string, string[]>>('/api/stages');
 }
 
-export function saveSkill(slug: string, content: string): Promise<SkillContent> {
-  return request<SkillContent>(`/api/skills/${slug}`, {
+export function listMarketplaceSkills(appId?: string): Promise<MarketplaceSkill[]> {
+  const query = appId ? `?app_id=${encodeURIComponent(appId)}` : '';
+  return request<MarketplaceSkill[]>(`/api/skills/marketplace${query}`);
+}
+
+export function getMarketplaceSkill(slug: string): Promise<SkillContent> {
+  return request<SkillContent>(
+    `/api/skills/marketplace/${encodeURIComponent(slug)}`,
+  );
+}
+
+export function installMarketplaceSkill(
+  slug: string,
+  stage: string,
+  appId: string,
+): Promise<{ slug: string; app_id: string; stage: string }> {
+  return request<{ slug: string; app_id: string; stage: string }>(
+    `/api/skills/marketplace/${encodeURIComponent(slug)}/install`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stage, app_id: appId }),
+    },
+  );
+}
+
+const skillAppQuery = (appId?: string) => appId ? `?app_id=${encodeURIComponent(appId)}` : '';
+
+export function getSkill(slug: string, appId?: string): Promise<SkillContent> {
+  return request<SkillContent>(`/api/skills/${encodeURIComponent(slug)}${skillAppQuery(appId)}`);
+}
+
+export function saveSkill(slug: string, content: string, appId?: string): Promise<SkillContent> {
+  return request<SkillContent>(`/api/skills/${encodeURIComponent(slug)}${skillAppQuery(appId)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ content }),
   });
 }
 
-export function createSkill(slug: string, content: string): Promise<SkillContent> {
-  return request<SkillContent>(`/api/skills?slug=${encodeURIComponent(slug)}`, {
+export function createSkill(slug: string, content: string, appId?: string): Promise<SkillContent> {
+  const params = new URLSearchParams({ slug });
+  if (appId) params.set('app_id', appId);
+  return request<SkillContent>(`/api/skills?${params.toString()}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ content }),
   });
+}
+
+export function listSkillVersions(
+  slug: string,
+  appId?: string,
+): Promise<SkillVersion[]> {
+  return request<SkillVersion[]>(
+    `/api/skills/${encodeURIComponent(slug)}/versions${skillAppQuery(appId)}`,
+  );
+}
+
+export function getSkillVersion(
+  slug: string,
+  versionId: string,
+  appId?: string,
+): Promise<SkillContent & { version_id: string }> {
+  return request<SkillContent & { version_id: string }>(
+    `/api/skills/${encodeURIComponent(slug)}/versions/${encodeURIComponent(versionId)}${skillAppQuery(appId)}`,
+  );
+}
+
+export function restoreSkillVersion(
+  slug: string,
+  versionId: string,
+  appId?: string,
+): Promise<SkillContent> {
+  return request<SkillContent>(
+    `/api/skills/${encodeURIComponent(slug)}/versions/${encodeURIComponent(versionId)}/restore${skillAppQuery(appId)}`,
+    { method: 'POST' },
+  );
 }
 
 // Non-secret fields come back as plain strings; secret fields come back as
@@ -152,10 +251,23 @@ export type IntegrationConfig = {
   STATUS_DONE: string;
   STATUS_IN_PROGRESS: string;
   STATUS_FAILED: string;
+  NOTIFY_ON_SUCCESS: string;
+  NOTIFY_ON_FAILURE: string;
+  NOTIFY_EMAIL_TO: string;
+  SMTP_HOST: string;
+  SMTP_PORT: string;
+  SMTP_FROM: string;
+  SMTP_USERNAME: string;
+  SMTP_STARTTLS: string;
+  JIRA_WEBHOOK_TOKEN: SecretField;
+  ADO_WEBHOOK_TOKEN: SecretField;
   JIRA_API_TOKEN: SecretField;
   ADO_PAT: SecretField;
   GITHUB_TOKEN: SecretField;
   AZURE_OPENAI_API_KEY: SecretField;
+  SLACK_WEBHOOK_URL: SecretField;
+  TEAMS_WEBHOOK_URL: SecretField;
+  SMTP_PASSWORD: SecretField;
 };
 
 export type ConfigUpdate = Partial<Record<keyof IntegrationConfig, string>>;
@@ -193,7 +305,11 @@ export type Application = {
   updated_at: string;
 };
 
-export const APP_SECRET_FIELDS = ['JIRA_API_TOKEN', 'ADO_PAT', 'GITHUB_TOKEN', 'AZURE_OPENAI_API_KEY'] as const;
+export const APP_SECRET_FIELDS = [
+  'JIRA_API_TOKEN', 'ADO_PAT', 'GITHUB_TOKEN', 'AZURE_OPENAI_API_KEY',
+  'SLACK_WEBHOOK_URL', 'TEAMS_WEBHOOK_URL', 'SMTP_PASSWORD', 'JIRA_WEBHOOK_TOKEN',
+  'ADO_WEBHOOK_TOKEN',
+] as const;
 export type AppSecretKey = typeof APP_SECRET_FIELDS[number];
 export type AppSettingKey = Exclude<keyof IntegrationConfig, AppSecretKey>
   | 'DEFAULT_PERSONA' | 'BRANCH_PREFIX' | 'GATE_MIN_WORDS' | 'REQUIRE_PR_APPROVAL' | 'PROTECTED_PATHS'

@@ -8,7 +8,7 @@ import pytest
 from conftest import client, sign_in
 from backend import apps_store, jira_bot, runs_db, teams_store, users_store
 from backend.jira_bot import PipelineHalt
-from test_account_governance import _cfg, fake_world  # noqa: F401  (fixture)
+from test_account_governance import FakeConversation, _cfg, fake_world  # noqa: F401  (fixture)
 
 
 # ── Point 3: teams & visibility ──────────────────────────────────────
@@ -139,10 +139,8 @@ def _capture_prompt(monkeypatch):
     import openhands.sdk as sdk
     sent = []
 
-    class Conv:
-        def __init__(self, **_): pass
+    class Conv(FakeConversation):
         def send_message(self, m): sent.append(m)
-        def run(self): pass
     monkeypatch.setattr(sdk, "Conversation", Conv)
     return sent
 

@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from conftest import GLOBAL_ENV, client, sign_in
-from backend import api_server, apps_store, jira_bot, runs_db
+from backend import api_server, apps_store, jira_bot, runs_db, skills_store
 from backend.jira_bot import PipelineConfig, PipelineHalt
 
 
@@ -64,11 +64,25 @@ def test_app_overrides_layer_on_top_of_env():
 
 
 def test_app_config_never_exposes_secret_values():
-    apps_store.create_app("Billing", config={"ADO_PAT": "super-secret-billing-pat"})
+    apps_store.create_app(
+        "Billing",
+        config={
+            "ADO_PAT": "super-secret-billing-pat",
+            "SLACK_WEBHOOK_URL": "https://hooks.slack.test/secret",
+            "JIRA_WEBHOOK_TOKEN": "do-not-return-webhook-token",
+            "ADO_WEBHOOK_TOKEN": "do-not-return-ado-webhook-token",
+        },
+    )
     cfg = apps_store.get_app_config("billing")
     assert "super-secret-billing-pat" not in repr(cfg)
     assert cfg["secrets"]["ADO_PAT"] == {"set": True, "inherited": False}
     assert cfg["secrets"]["GITHUB_TOKEN"] == {"set": True, "inherited": True}
+    assert "https://hooks.slack.test/secret" not in repr(cfg)
+    assert cfg["secrets"]["SLACK_WEBHOOK_URL"] == {"set": True, "inherited": False}
+    assert "do-not-return-webhook-token" not in repr(cfg)
+    assert cfg["secrets"]["JIRA_WEBHOOK_TOKEN"] == {"set": True, "inherited": False}
+    assert "do-not-return-ado-webhook-token" not in repr(cfg)
+    assert cfg["secrets"]["ADO_WEBHOOK_TOKEN"] == {"set": True, "inherited": False}
 
 
 def test_blank_secret_kept_and_blank_setting_reverts_to_inherited():
@@ -107,10 +121,148 @@ def test_api_onboarding_flow():
     assert body["secrets"]["JIRA_API_TOKEN"]["set"] is True
     assert "tok" not in r.text
 
+    r = client.put(
+        "/api/apps/checkout-service/config",
+        json={
+            "NOTIFY_ON_FAILURE": "true",
+            "SLACK_WEBHOOK_URL": "https://hooks.slack.test/private",
+            "JIRA_WEBHOOK_TOKEN": "another-webhook-secret",
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["values"]["NOTIFY_ON_FAILURE"] == "true"
+    assert r.json()["secrets"]["SLACK_WEBHOOK_URL"]["set"] is True
+    assert "https://hooks.slack.test/private" not in r.text
+    assert r.json()["secrets"]["JIRA_WEBHOOK_TOKEN"]["set"] is True
+    assert "another-webhook-secret" not in r.text
+
     assert client.put("/api/apps/checkout-service/config", json={"GATE_MIN_WORDS": "lots"}).status_code == 400
     assert client.get("/api/apps/nope/config").status_code == 404
     assert client.delete("/api/apps/default").status_code == 400
     assert client.delete("/api/apps/checkout-service").status_code == 200
+
+
+def test_app_skill_api_keeps_additions_and_overrides_isolated(monkeypatch, tmp_path):
+    sign_in("skills-admin", "admin")
+    apps_store.create_app("Checkout")
+    apps_store.create_app("Billing")
+    shared_dir = tmp_path / "shared"
+    shared_skill = shared_dir / "backend-engineer" / "SKILL.md"
+    shared_skill.parent.mkdir(parents=True)
+    shared_skill.write_text(
+        "---\n"
+        "name: backend-engineer\n"
+        "description: Shared backend persona.\n"
+        "metadata:\n"
+        "  sdlc_stage: implementation\n"
+        "triggers:\n"
+        "  - endpoint\n"
+        "---\n"
+        "Shared persona instructions.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(skills_store, "SKILLS_DIR", shared_dir)
+    monkeypatch.setattr(skills_store, "APP_SKILLS_DIR", tmp_path / "apps")
+    monkeypatch.setattr(skills_store, "VERSIONS_DIR", tmp_path / "versions")
+
+    override_response = client.put(
+        "/api/skills/backend-engineer",
+        params={"app_id": "checkout"},
+        json={
+            "content": (
+                "---\n"
+                "name: backend-engineer\n"
+                "description: Checkout-only backend persona.\n"
+                "metadata:\n"
+                "  sdlc_stage: implementation\n"
+                "triggers:\n"
+                "  - checkout endpoint\n"
+                "---\n"
+                "Checkout-specific instructions.\n"
+            ),
+        },
+    )
+    add_response = client.post(
+        "/api/skills",
+        params={"app_id": "checkout", "slug": "checkout-payments"},
+        json={
+            "content": (
+                "---\n"
+                "name: checkout-payments\n"
+                "description: Checkout-only payments persona.\n"
+                "metadata:\n"
+                "  sdlc_stage: implementation\n"
+                "triggers:\n"
+                "  - payments\n"
+                "---\n"
+                "Payments instructions.\n"
+            ),
+        },
+    )
+
+    assert override_response.status_code == 200, override_response.text
+    assert add_response.status_code == 200, add_response.text
+    checkout = client.get("/api/skills", params={"app_id": "checkout"}).json()
+    billing = client.get("/api/skills", params={"app_id": "billing"}).json()
+    shared = client.get("/api/skills").json()
+    checkout_by_slug = {skill["slug"]: skill for skill in checkout}
+
+    assert checkout_by_slug["backend-engineer"]["source"] == "app"
+    assert checkout_by_slug["backend-engineer"]["overrides_shared"] is True
+    assert "checkout-payments" in {skill["slug"] for skill in checkout}
+    assert "checkout-payments" not in {skill["slug"] for skill in billing}
+    assert "checkout-payments" not in {skill["slug"] for skill in shared}
+    shared_read = client.get("/api/skills/backend-engineer")
+    assert shared_read.status_code == 200
+    assert "Shared persona instructions" in shared_read.json()["content"]
+
+    next_checkout_content = (
+        "---\n"
+        "name: backend-engineer\n"
+        "description: Updated checkout-only backend persona.\n"
+        "metadata:\n"
+        "  sdlc_stage: implementation\n"
+        "triggers:\n"
+        "  - checkout endpoint\n"
+        "---\n"
+        "Updated checkout-specific instructions.\n"
+    )
+    assert client.put(
+        "/api/skills/backend-engineer",
+        params={"app_id": "checkout"},
+        json={"content": next_checkout_content},
+    ).status_code == 200
+    versions = client.get(
+        "/api/skills/backend-engineer/versions",
+        params={"app_id": "checkout"},
+    )
+    assert versions.status_code == 200
+    assert len(versions.json()) == 2
+    prior_checkout_version = next(
+        version for version in versions.json()
+        if "Checkout-specific instructions" in client.get(
+            f"/api/skills/backend-engineer/versions/{version['version_id']}",
+            params={"app_id": "checkout"},
+        ).json()["content"]
+    )
+    restored = client.post(
+        f"/api/skills/backend-engineer/versions/{prior_checkout_version['version_id']}/restore",
+        params={"app_id": "checkout"},
+    )
+    assert restored.status_code == 200
+    assert "Checkout-specific instructions" in restored.json()["content"]
+    assert "Shared persona instructions" in client.get(
+        "/api/skills/backend-engineer"
+    ).json()["content"]
+
+    assert client.get(
+        "/api/skills/checkout-payments",
+        params={"app_id": "billing"},
+    ).status_code == 404
+    assert client.get("/api/skills", params={"app_id": "missing"}).status_code == 404
+    assert client.delete("/api/apps/checkout").status_code == 200
+    assert not (tmp_path / "apps" / "checkout").exists()
+    assert not (tmp_path / "versions" / "apps" / "checkout").exists()
 
 
 def test_run_ticket_rejects_unknown_app():
@@ -163,7 +315,7 @@ def test_two_apps_running_at_once_never_share_settings(monkeypatch):
                                              "DEFAULT_PERSONA": "security-reviewer"})
     apps_store.create_app("Billing", config={"TICKET_PROVIDER": "jira", "JIRA_BASE_URL": "https://billing.atlassian.net",
                                             "JIRA_USER_EMAIL": "bot@billing", "JIRA_API_TOKEN": "billing-token",
-                                            "DEFAULT_PERSONA": "backend-engineer"})
+                                            "DEFAULT_PERSONA": "frontend-engineer"})
 
     results: dict = {}
     fetch_logs: dict = {}
@@ -193,5 +345,5 @@ def test_two_apps_running_at_once_never_share_settings(monkeypatch):
                                    "pat": "checkout-pat", "assignee": ""}, "Needs Info")
     assert by_provider["jira"] == ({"base_url": "https://billing.atlassian.net", "user_email": "bot@billing",
                                     "api_token": "billing-token"}, "Human In Loop")
-    assert "persona: security-reviewer" in fetch_logs["checkout"]
-    assert "persona: backend-engineer" in fetch_logs["billing"]
+    assert "persona: backend-engineer" in fetch_logs["checkout"]
+    assert "persona: frontend-engineer" in fetch_logs["billing"]

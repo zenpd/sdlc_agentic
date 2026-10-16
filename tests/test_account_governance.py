@@ -106,6 +106,13 @@ class _FakeTicket:
         return SimpleNamespace(is_error=False, result="", text="ok")
 
 
+class FakeConversation:
+    conversation_stats = SimpleNamespace(get_combined_metrics=lambda: None)
+    def __init__(self, **_): pass
+    def send_message(self, _): pass
+    def run(self): pass
+
+
 @pytest.fixture
 def fake_world(monkeypatch):
     """Everything outside our code is faked: ticket board, LLM, agent, git, GitHub."""
@@ -116,18 +123,26 @@ def fake_world(monkeypatch):
     monkeypatch.setattr(jira_bot, "ADOExecutor", lambda **kw: world.ticket)
 
     class FakeLLM:
+        metrics = None
         def __init__(self, **_): pass
         def completion(self, messages):
             return SimpleNamespace(message=SimpleNamespace(content=[TextContent(text="YES clear enough")]))
 
-    class FakeConversation:
-        def __init__(self, **_): pass
-        def send_message(self, _): pass
-        def run(self): pass
-
     monkeypatch.setattr(sdk, "LLM", FakeLLM)
     monkeypatch.setattr(sdk, "Agent", lambda **_: None)
     monkeypatch.setattr(sdk, "Conversation", FakeConversation)
+    monkeypatch.setattr(jira_bot, "_report_usage", lambda *a: None)
+    # The read-only verification reviewer and its diff (dev_ruchitha's verify stage).
+    monkeypatch.setattr(jira_bot, "_collect_verification_diff", lambda repo_dir, base: "diff --git a/src/app.py b/src/app.py\n")
+    monkeypatch.setattr(jira_bot, "_run_verification_agent", lambda *a, **k: "VERDICT: PASS\nLooks right.")
+    real_subprocess_run = jira_bot.subprocess.run
+
+    def fake_subprocess_run(cmd, *args, **kwargs):
+        if cmd[:3] == ["git", "diff", "--check"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return real_subprocess_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(jira_bot.subprocess, "run", fake_subprocess_run)
 
     def fake_run_cmd(cmd, cwd=None, silent=False):
         joined = " ".join(cmd)
@@ -195,7 +210,7 @@ def _park_run_waiting(monkeypatch, timeout_sec=10):
     monkeypatch.setattr(api_server, "APPROVAL_TIMEOUT_SEC", timeout_sec)
     outcome = {}
 
-    def fake_pipeline(ticket_key, on_step, config, wait_for_approval):
+    def fake_pipeline(ticket_key, on_step, config, wait_for_approval, **_):
         outcome["decision"] = wait_for_approval({"modified_files": ["src/app.py"]})
         return {"pr_url": None}
 

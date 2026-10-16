@@ -200,6 +200,8 @@ yarn-debug.log*
 yarn-error.log*
 
 logs
+!ui/app/logs/
+!ui/app/logs/**
 
 # agent
 .envrc
@@ -219,6 +221,10 @@ agent-sdk.workspace.code-workspace
 # Integration test outputs
 tests/integration/outputs/
 tests/integration/api_compliance/outputs/
+
+# Runtime-managed application skill overrides and their version history
+skills/apps/
+skills/.versions/
 
 # Agent-generated temp
 .agent_tmp/

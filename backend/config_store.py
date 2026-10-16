@@ -34,6 +34,14 @@ NON_SECRET_FIELDS = [
     "STATUS_FAILED",
     "JIRA_JQL",
     "ADO_WIQL",
+    "NOTIFY_ON_SUCCESS",
+    "NOTIFY_ON_FAILURE",
+    "NOTIFY_EMAIL_TO",
+    "SMTP_HOST",
+    "SMTP_PORT",
+    "SMTP_FROM",
+    "SMTP_USERNAME",
+    "SMTP_STARTTLS",
 ]
 
 # Fields that are only ever reported as {"set": bool} — the raw value never
@@ -44,6 +52,11 @@ SECRET_FIELDS = [
     "ADO_PAT",
     "GITHUB_TOKEN",
     "AZURE_OPENAI_API_KEY",
+    "SLACK_WEBHOOK_URL",
+    "TEAMS_WEBHOOK_URL",
+    "SMTP_PASSWORD",
+    "JIRA_WEBHOOK_TOKEN",
+    "ADO_WEBHOOK_TOKEN",
 ]
 
 ALL_MANAGED_FIELDS = NON_SECRET_FIELDS + SECRET_FIELDS

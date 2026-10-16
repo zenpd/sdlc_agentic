@@ -21,6 +21,7 @@ logger = get_logger(__name__)
 _BLOCK_BREAK_RE = re.compile(r"</?(?:br|p|div|li|ul|ol|h[1-6])\b[^>]*>", re.IGNORECASE)
 _TAG_RE = re.compile(r"<[^>]+>")
 _BLANKLINES_RE = re.compile(r"\n{3,}")
+_WORK_ITEM_ID_RE = re.compile(r"^[1-9]\d{0,9}$")
 
 
 def _html_to_text(raw: str) -> str:
@@ -32,6 +33,45 @@ def _html_to_text(raw: str) -> str:
     text = _TAG_RE.sub("", text)
     text = html.unescape(text)
     return _BLANKLINES_RE.sub("\n\n", text).strip()
+
+
+def ado_ticket_matches_wiql(
+    *,
+    org_url: str,
+    project: str,
+    pat: str,
+    wiql: str,
+    work_item_id: str,
+) -> bool:
+    """Return whether this Azure DevOps work item satisfies the app's WIQL."""
+    if not _WORK_ITEM_ID_RE.fullmatch(work_item_id):
+        raise ValueError("Invalid Azure DevOps work item ID")
+    if not wiql.strip():
+        raise ValueError("No Azure DevOps WIQL is configured for this application")
+
+    query = re.sub(
+        r"\s+ORDER\s+BY\b.*$",
+        "",
+        wiql.strip(),
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not query:
+        raise ValueError("The configured Azure DevOps WIQL has no filter clause")
+
+    session = requests.Session()
+    session.auth = ("", pat)
+    try:
+        response = session.post(
+            f"{org_url.rstrip('/')}/{project}/_apis/wit/wiql",
+            params={"api-version": "7.1"},
+            json={"query": f"({query}) AND [System.Id] = {work_item_id}"},
+            headers={"Content-Type": "application/json"},
+        )
+        response.raise_for_status()
+        items = response.json().get("workItems", [])
+        return any(str(item.get("id")) == work_item_id for item in items)
+    finally:
+        session.close()
 
 
 ENV_VARS = {"ADO_ORG_URL", "ADO_PROJECT", "ADO_PAT"}

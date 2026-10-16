@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 import fnmatch
+import logging
 import os
 import re
 import signal
@@ -10,22 +13,22 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 import requests
 from dotenv import load_dotenv
 
-# Windows consoles / non-interactive threads often default stdout to cp1252,
-# which can't encode the box-drawing and arrow characters used in step logs below.
-for _stream in (sys.stdout, sys.stderr):
-    if hasattr(_stream, "reconfigure"):
-        _stream.reconfigure(encoding="utf-8", errors="replace")
-
-from backend.jira_tool import JiraExecutor, JiraAction
-from backend.ado_tool import ADOExecutor, ADOAction
 from backend import skills_store
+from backend.ado_tool import ADOAction, ADOExecutor
+from backend.jira_tool import JiraAction, JiraExecutor
+
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from openhands.sdk.llm.utils.metrics import Metrics
 
 # ── Config ──────────────────────────────────────────────────────────
 # Everything a run needs to know about *which* application it's working for
@@ -187,6 +190,195 @@ class PipelineConfig:
 
 
 OnStep = Callable[[str, str, Optional[str]], None]
+OnLog = Callable[[str, str, str], None]
+OnUsage = Callable[[str, int, int, float | None, int, int], None]
+MAX_VERIFICATION_DIFF_CHARS = 120_000
+
+
+def _collect_verification_diff(repo_dir: Path, base_commit: str) -> str:
+    """Collect a bounded diff, including new files, for a read-only reviewer."""
+    try:
+        untracked = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            cwd=repo_dir,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise RuntimeError(f"Could not list untracked files: {e}") from e
+    if untracked.returncode != 0:
+        raise RuntimeError(
+            f"Could not list untracked files for verification: "
+            f"{untracked.stderr.decode(errors='replace')[:300]}"
+        )
+    untracked_paths = [
+        os.fsdecode(path)
+        for path in untracked.stdout.split(b"\0")
+        if path
+    ]
+    if untracked_paths:
+        try:
+            intent_to_add = subprocess.run(
+                ["git", "add", "-N", "--", *untracked_paths],
+                cwd=repo_dir,
+                capture_output=True,
+                timeout=30,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as e:
+            raise RuntimeError(f"Could not include new files in diff: {e}") from e
+        if intent_to_add.returncode != 0:
+            raise RuntimeError(
+                f"Could not include new files in verification diff: "
+                f"{intent_to_add.stderr.decode(errors='replace')[:300]}"
+            )
+
+    try:
+        diff = subprocess.run(
+            ["git", "diff", "--no-ext-diff", "--unified=3", base_commit],
+            cwd=repo_dir,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise RuntimeError(f"Could not collect verification diff: {e}") from e
+    if diff.returncode != 0:
+        raise RuntimeError(
+            "Could not collect verification diff: "
+            f"{diff.stderr.decode(errors='replace')[:300]}"
+        )
+    diff_text = diff.stdout.decode(errors="replace")
+    if not diff_text.strip():
+        raise RuntimeError("No repository diff was available for verification.")
+    if len(diff_text) > MAX_VERIFICATION_DIFF_CHARS:
+        raise RuntimeError(
+            "The change is too large for the automated verification review "
+            f"({len(diff_text)} characters; limit is "
+            f"{MAX_VERIFICATION_DIFF_CHARS})."
+        )
+    return diff_text
+
+
+def _verification_verdict(response: str) -> str | None:
+    """Accept only an explicit first-line PASS or FAIL from the reviewer."""
+    first_line = next(
+        (line.strip() for line in response.splitlines() if line.strip()),
+        "",
+    )
+    match = re.fullmatch(r"VERDICT:\s*(PASS|FAIL)", first_line)
+    return match.group(1) if match else None
+
+
+def _normalize_reported_eof_blank_lines(
+    repo_dir: Path,
+    changed_paths: list[str],
+    diff_check_output: str,
+) -> list[str]:
+    """Normalize only changed whitespace reported by ``git diff --check``."""
+    known_paths = set(changed_paths)
+    eof_paths = set()
+    trailing_whitespace_lines: dict[str, set[int]] = {}
+    diagnostic_suffix = ": new blank line at EOF."
+    trailing_suffix = ": trailing whitespace."
+
+    for line in diff_check_output.splitlines():
+        if line.endswith(diagnostic_suffix):
+            location = line[: -len(diagnostic_suffix)]
+            reported_path, separator, _line_number = location.rpartition(":")
+            if separator and reported_path in known_paths:
+                eof_paths.add(reported_path)
+            continue
+        if not line.endswith(trailing_suffix):
+            continue
+        location = line[: -len(trailing_suffix)]
+        reported_path, separator, line_number = location.rpartition(":")
+        if not separator or reported_path not in known_paths:
+            continue
+        try:
+            trailing_whitespace_lines.setdefault(reported_path, set()).add(
+                int(line_number)
+            )
+        except ValueError:
+            continue
+
+    normalized_paths = []
+    paths_to_normalize = eof_paths | trailing_whitespace_lines.keys()
+    for reported_path in paths_to_normalize:
+        path = repo_dir / reported_path
+        try:
+            resolved_path = path.resolve(strict=True)
+            resolved_path.relative_to(repo_dir.resolve(strict=True))
+        except (OSError, ValueError):
+            continue
+        if path.is_symlink() or not resolved_path.is_file():
+            continue
+
+        contents = resolved_path.read_bytes()
+        lines = contents.splitlines(keepends=True)
+        changed = False
+        for line_number in trailing_whitespace_lines.get(reported_path, set()):
+            index = line_number - 1
+            if index < 0 or index >= len(lines):
+                continue
+            line = lines[index]
+            body = line.rstrip(b"\r\n")
+            newline = line[len(body) :]
+            trimmed_body = body.rstrip(b" \t")
+            if trimmed_body != body:
+                lines[index] = trimmed_body + newline
+                changed = True
+
+        contents = b"".join(lines)
+        if reported_path in eof_paths:
+            trimmed = contents.rstrip(b"\r\n")
+            trailing_newlines = contents[len(trimmed) :]
+            if len(trailing_newlines) >= 2:
+                newline = (
+                    b"\r\n" if trailing_newlines.endswith(b"\r\n") else b"\n"
+                )
+                contents = trimmed + newline
+                changed = True
+
+        if changed:
+            resolved_path.write_bytes(contents)
+            normalized_paths.append(reported_path)
+
+    return normalized_paths
+
+
+def _run_verification_agent(
+    llm,
+    repo_dir: Path,
+    prompt: str,
+    on_step: OnStep,
+    on_usage: OnUsage | None = None,
+) -> str:
+    """Run a read-only verifier with no repository tools."""
+    from openhands.sdk import Agent, Conversation
+    from openhands.sdk.conversation import get_agent_final_response
+
+    verification_llm = llm.model_copy(deep=True)
+    verification_llm.reset_metrics()
+    agent = Agent(llm=verification_llm, tools=[])
+    conversation = Conversation(
+        agent=agent,
+        workspace=str(repo_dir),
+        callbacks=[_make_agent_event_logger(on_step, step_key="verify")],
+        max_iteration_per_run=12,
+    )
+    try:
+        conversation.send_message(prompt)
+        conversation.run()
+        return get_agent_final_response(conversation.state.active_branch())
+    finally:
+        if on_usage is not None:
+            _report_usage(
+                on_usage,
+                "verify",
+                conversation.conversation_stats.get_combined_metrics(),
+            )
 
 # Called when an app requires sign-off before a PR opens. Receives a summary
 # of the change and blocks until someone decides: returns (approved, actor,
@@ -232,9 +424,39 @@ def _noop_on_step(step: str, state: str, log: Optional[str] = None) -> None:
     pass
 
 
-def _make_agent_event_logger(on_step_fn: OnStep):
-    """Builds a Conversation `callbacks=` function that turns the agent's live
-    tool calls/results into short log lines pushed onto the 'agent' step, so
+def _noop_on_log(stage: str, level: str, message: str) -> None:
+    pass
+
+
+def _noop_on_usage(
+    stage: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    cost_usd: float | None,
+    request_count: int,
+    priced_request_count: int,
+) -> None:
+    pass
+
+
+def _report_usage(on_usage: OnUsage, stage: str, metrics: Metrics) -> None:
+    usage = metrics.accumulated_token_usage
+    request_count = len(metrics.response_latencies)
+    priced_request_count = len(metrics.costs)
+    cost_usd = metrics.accumulated_cost if priced_request_count else None
+    on_usage(
+        stage,
+        usage.prompt_tokens if usage else 0,
+        usage.completion_tokens if usage else 0,
+        cost_usd,
+        request_count,
+        priced_request_count,
+    )
+
+
+def _make_agent_event_logger(on_step_fn: OnStep, step_key: str = "agent"):
+    """Builds a Conversation `callbacks=` function that turns live tool
+    calls/results into short log lines pushed onto the selected pipeline step, so
     the UI can show what the agent is actually doing (which command, which
     file) instead of one opaque spinner for the whole run.
 
@@ -255,7 +477,7 @@ def _make_agent_event_logger(on_step_fn: OnStep):
             action = event.action
             if event.tool_name == "terminal" and action is not None:
                 cmd = (getattr(action, "command", "") or "")[:160]
-                on_step_fn("agent", "in-progress", f"[TOOL:terminal] $ {cmd}")
+                on_step_fn(step_key, "in-progress", f"[TOOL:terminal] $ {cmd}")
             elif event.tool_name == "file_editor" and action is not None:
                 path = getattr(action, "path", "")
                 cmd = getattr(action, "command", "")
@@ -265,16 +487,16 @@ def _make_agent_event_logger(on_step_fn: OnStep):
                 elif cmd == "view" and getattr(action, "view_range", None):
                     a, b = action.view_range
                     detail = f" (lines {a}-{b})"
-                on_step_fn("agent", "in-progress", f"[TOOL:file_editor] {cmd} -> {path}{detail}")
+                on_step_fn(step_key, "in-progress", f"[TOOL:file_editor] {cmd} -> {path}{detail}")
             elif event.tool_name == "task_tracker" and action is not None:
                 cmd = getattr(action, "command", "")
-                on_step_fn("agent", "in-progress", f"[TOOL:task_tracker] {cmd}")
+                on_step_fn(step_key, "in-progress", f"[TOOL:task_tracker] {cmd}")
             else:
-                on_step_fn("agent", "in-progress", f"[TOOL:{event.tool_name}] called")
+                on_step_fn(step_key, "in-progress", f"[TOOL:{event.tool_name}] called")
         elif isinstance(event, ObservationEvent):
             obs = event.observation
             status = "FAILED" if obs.is_error else "ok"
-            on_step_fn("agent", "in-progress", f"[RESULT:{event.tool_name}] {status}")
+            on_step_fn(step_key, "in-progress", f"[RESULT:{event.tool_name}] {status}")
 
             if (
                 event.tool_name == "file_editor"
@@ -292,9 +514,9 @@ def _make_agent_event_logger(on_step_fn: OnStep):
                     if truncated:
                         snippet += f"\n... ({len(body) - 24} more lines)"
                     path = getattr(obs, "path", "") or ""
-                    on_step_fn("agent", "in-progress", f"[DIFF:file_editor] {path}\n{snippet}")
+                    on_step_fn(step_key, "in-progress", f"[DIFF:file_editor] {path}\n{snippet}")
         elif isinstance(event, AgentErrorEvent):
-            on_step_fn("agent", "in-progress", f"[AGENT-ERROR] {event.error[:200]}")
+            on_step_fn(step_key, "in-progress", f"[AGENT-ERROR] {event.error[:200]}")
 
     return _on_agent_event
 
@@ -302,13 +524,9 @@ def _make_agent_event_logger(on_step_fn: OnStep):
 # ── Helpers ─────────────────────────────────────────────────────────
 def run_cmd(cmd: list[str], cwd: Path | None = None, silent: bool = False) -> tuple[int, str, str]:
     """Run a command, return (exit_code, stdout, stderr)."""
-    if not silent:
-        print(f"  $ {' '.join(cmd)}")
     r = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
-    if r.stdout:
-        print(r.stdout[:1500])
-    if r.stderr:
-        print(r.stderr[:500])
+    if not silent:
+        logger.debug("Pipeline subprocess completed", extra={"return_code": r.returncode})
     return r.returncode, r.stdout, r.stderr
 
 
@@ -413,22 +631,40 @@ def gh_api(token: str, method: str, path: str, json_data: dict | None = None) ->
     return resp.json()
 
 
-def step(msg: str):
-    print(f"\n{'─' * 60}")
-    print(f"  [{msg}]")
-    print(f"{'─' * 60}")
+def _create_pull_request(
+    token: str,
+    target_repo: str,
+    title: str,
+    head: str,
+    base: str,
+    body: str,
+) -> str:
+    response = gh_api(
+        token,
+        "POST",
+        f"/repos/{target_repo}/pulls",
+        {"title": title, "head": head, "base": base, "body": body},
+    )
+    if not isinstance(response, dict):
+        raise RuntimeError("GitHub returned an unexpected pull request response.")
+    pr_url = response.get("html_url")
+    if not isinstance(pr_url, str) or not pr_url:
+        raise RuntimeError("GitHub created no pull request URL in its response.")
+    return pr_url
 
 
 # ── Pipeline ────────────────────────────────────────────────────────
 def run_pipeline(
     ticket_key: Optional[str] = None,
     on_step: OnStep = _noop_on_step,
+    on_log: OnLog = _noop_on_log,
     target_repo: Optional[str] = None,
     target_branch: Optional[str] = None,
     config: Optional[PipelineConfig] = None,
     wait_for_approval: Optional[WaitForApproval] = None,
+    on_usage: OnUsage = _noop_on_usage,
 ) -> dict:
-    """Runs the 6-stage ticket -> PR pipeline for one ticket (Jira or Azure DevOps,
+    """Runs the ticket -> PR pipeline for one ticket (Jira or Azure DevOps,
     per the application's ticket provider).
 
     ticket_key: if given, targets that specific ticket/work item directly.
@@ -447,19 +683,27 @@ def run_pipeline(
             raise PipelineHalt("failed", str(e))
     cfg = config
 
+    def log_event(stage: str, message: str, level: str = "info") -> None:
+        on_log(stage, level, message)
+
+    def report_usage(stage: str, metrics: Metrics) -> None:
+        _report_usage(on_usage, stage, metrics)
+
     workspace_dir = Path(tempfile.mkdtemp(prefix="jira_bot_"))
 
     missing = cfg.missing_settings()
     if missing:
         raise PipelineHalt("failed", f"Missing settings for application '{cfg.app_name}': {', '.join(missing)}")
 
-    print(f"  Application: {cfg.app_name} ({cfg.app_id}) · provider: {cfg.ticket_provider}")
+    log_event(
+        "run",
+        f"Starting pipeline for {cfg.app_name} ({cfg.app_id}); provider={cfg.ticket_provider}",
+    )
     ticket = cfg.ticket_executor()
     TicketAction = cfg.ticket_action
 
     # ── STEP 1: FETCH ───────────────────────────────────────────────
-    on_step("fetch", "in-progress")
-    step("1/8  FETCH — Searching for ticket")
+    on_step("fetch", "in-progress", "Searching for ticket")
 
     if cfg.ticket_provider == "ado":
         query_desc = str(ticket_key) if ticket_key else (cfg.ticket_query or "tag 'Agent-ready', state 'New'")
@@ -482,18 +726,16 @@ def run_pipeline(
 
     def post_comment(text: str, step_key: str, state: str) -> None:
         """Post a comment on the ticket. Any failure (bad scope, transient
-        network error, etc.) is printed and pushed into that step's own log
+        network error, etc.) is pushed into that step's own log
         instead of being silently discarded — a swallowed failure here used to
         look identical to "worked fine" from the ticket's side."""
         obs = ticket(TicketAction(command="add_comment", ticket_key=resolved_key, comment_text=text))
         if obs.is_error:
-            print(f"  !! Failed to post comment on {resolved_key}: {obs.text}")
             on_step(step_key, state, f"[WARN] Comment not posted to ticket: {obs.text[:200]}")
 
     def set_ticket_status(target_status: str, step_key: str, state: str) -> None:
         obs = ticket(TicketAction(command="update_status", ticket_key=resolved_key, target_status=target_status))
         if obs.is_error:
-            print(f"  !! Failed to update status on {resolved_key}: {obs.text}")
             on_step(step_key, state, f"[WARN] Status not updated on ticket: {obs.text[:200]}")
 
     summary = ""
@@ -512,6 +754,8 @@ def run_pipeline(
         elif in_desc and line.strip() and not any(line.startswith(p) for p in ["Key:", "Summary:", "Status:", "Priority:"]):
             desc_lines.append(line.strip())
     description = "\n".join(desc_lines)
+    if status_name:
+        log_event("fetch", f"Current ticket status: {status_name}")
 
     # The ticket itself can name its target repo/branch/persona, e.g.:
     #   Repo: owner/repo
@@ -532,65 +776,81 @@ def run_pipeline(
     # Strip those lines from the working description so they don't confuse the gate/agent prompts.
     description = re.sub(r"(?im)^\s*(repo(?:sitory)?|branch|persona)\s*:\s*\S+\s*$", "", description).strip()
 
-    known_personas = {s["slug"] for s in skills_store.list_skills() if "error" not in s}
-    if persona_match and persona_match.group(1) in known_personas:
+    pipeline_stage = "code"
+    eligible_personas = {
+        skill["slug"]
+        for skill in skills_store.list_skills(
+            stage=pipeline_stage,
+            app_id=cfg.app_id,
+        )
+        if "error" not in skill
+    }
+    if persona_match and persona_match.group(1) not in eligible_personas:
+        log_event(
+            "fetch",
+            f"Requested persona {persona_match.group(1)!r} is not enabled for "
+            f"pipeline stage {pipeline_stage}; selecting a compatible persona.",
+            "warning",
+        )
+    if persona_match and persona_match.group(1) in eligible_personas:
         persona = persona_match.group(1)
-    elif cfg.default_persona in known_personas:
+    elif cfg.default_persona in eligible_personas:
         persona = cfg.default_persona
     else:
-        persona = skills_store.select_persona(summary, description)
+        if cfg.default_persona:
+            log_event(
+                "fetch",
+                f"Default persona {cfg.default_persona!r} is not enabled for "
+                f"pipeline stage {pipeline_stage}; selecting a compatible persona.",
+                "warning",
+            )
+        persona = skills_store.select_persona(
+            summary,
+            description,
+            stage=pipeline_stage,
+            app_id=cfg.app_id,
+        )
 
     repo_dir = workspace_dir / target_repo.split("/")[-1]
-    print(f"  Target repo: {target_repo} ({target_branch})")
+    log_event("agent", f"Target repository: {target_repo} ({target_branch})")
 
     ticket_url = f"{cfg.ticket_url_base}{resolved_key}"
 
-    print(f"  Ticket: {resolved_key}")
-    print(f"  Summary: {summary}")
-    print(f"  Status: {status_name}")
-    print(f"  Persona: {persona}")
     on_step("fetch", "success", f"{resolved_key}: {summary} (persona: {persona})")
 
     # ── STEP 2: ASSIGN — hand the ticket to the bot account ────────
-    on_step("assign", "in-progress")
-    step("2/8  ASSIGN — Assigning ticket to bot")
+    on_step("assign", "in-progress", "Assigning ticket to bot")
 
     assign_result = ticket(TicketAction(command="assign_to_self", ticket_key=resolved_key))
     if assign_result.is_error:
-        print(f"  !! {assign_result.text}")
         on_step("assign", "failed", assign_result.text)
     else:
-        print(f"  [OK] {assign_result.text}")
         on_step("assign", "success", assign_result.text)
 
     # ── STEP 3: IN PROGRESS — move ticket out of the backlog ──────
-    on_step("in_progress", "in-progress")
-    step("3/8  IN PROGRESS — Moving ticket to in-progress")
+    on_step("in_progress", "in-progress", "Moving ticket to in-progress")
 
     ip_result = ticket(TicketAction(command="update_status", ticket_key=resolved_key, target_status=cfg.status_in_progress))
     if ip_result.is_error:
-        print(f"  !! {ip_result.text}")
         on_step("in_progress", "failed", ip_result.text)
     else:
-        print(f"  [OK] {ip_result.text}")
         on_step("in_progress", "success", ip_result.text)
 
     # ── STEP 4: CLARITY GATE ───────────────────────────────────────
-    on_step("gate", "in-progress")
-    step("4/8  CLARITY GATE — Checking ticket detail")
+    on_step("gate", "in-progress", "Checking ticket detail")
 
     word_count = len(description.split())
     if word_count < cfg.gate_min_words:
         msg = f"Ticket description is too short ({word_count} words). Please provide more detail including specific packages, versions, and repository to modify."
-        print(f"  !! {msg}")
         on_step("gate", "human", msg)
         post_comment(msg, "gate", "human")
         set_ticket_status(cfg.status_failed, "gate", "human")
         raise PipelineHalt("human", msg)
 
+    from pydantic import SecretStr
+
     from openhands.sdk import LLM
     from openhands.sdk.llm import Message, TextContent
-    from pydantic import SecretStr
 
     gate_llm = LLM(
         model=cfg.azure_model,
@@ -617,16 +877,15 @@ def run_pipeline(
             if isinstance(first, TextContent):
                 gate_text = first.text.strip()
     except Exception as e:
-        print(f"  !!! Gate LLM call failed: {e}")
         msg = f"Clarity check failed to run (technical error): {e}"
         on_step("gate", "failed", msg)
         post_comment("Clarity check failed to run (technical error) — please retry or check the bot logs", "gate", "failed")
         set_ticket_status(cfg.status_failed, "gate", "failed")
         raise PipelineHalt("failed", msg)
+    finally:
+        report_usage("gate", gate_llm.metrics)
 
     gate_ok = gate_text.strip().upper().startswith("YES")
-    print(f"  Gate response: {gate_text.strip()[:200]}")
-    print(f"  → {'[OK] PASS' if gate_ok else '!! FAIL'}")
 
     if not gate_ok:
         on_step("gate", "human", gate_text.strip()[:200])
@@ -637,11 +896,9 @@ def run_pipeline(
     on_step("gate", "success", gate_text.strip()[:200])
 
     # ── STEP 3: AGENT RUN ─────────────────────────────────────────
-    on_step("agent", "in-progress")
-    step("5/8  AGENT RUN — Cloning repo and running agent")
+    on_step("agent", "in-progress", "Cloning repository and starting coding agent")
 
     repo_url = f"https://{cfg.github_token}@github.com/{target_repo}.git"
-    print(f"  Git clone URL: https://<token>@github.com/{target_repo}.git")
     rc, out, err = run_cmd(
         ["git", "clone", "--branch", target_branch, repo_url, str(repo_dir)],
         cwd=workspace_dir,
@@ -649,7 +906,6 @@ def run_pipeline(
     )
     if rc != 0:
         msg = f"Failed to clone repo: {err[:300]}"
-        print(f"!! {msg}")
         on_step("agent", "failed", msg)
         post_comment(msg, "agent", "failed")
         raise PipelineHalt("failed", msg)
@@ -676,20 +932,46 @@ def run_pipeline(
     # Persona skill content, rendered with this run's variables (see
     # skills/README.md for the {{VAR}} contract) — sets the agent's operating
     # persona before it sees the specific ticket.
-    persona_content = skills_store.render_skill(
-        persona,
+    skill_vars = dict(
         TICKET_KEY=resolved_key,
         TICKET_SUMMARY=summary,
         TARGET_REPO=target_repo,
         TARGET_BRANCH=target_branch,
         PERSONA=persona,
     )
+    persona_content = skills_store.render_skill(
+        persona,
+        stage=pipeline_stage,
+        app_id=cfg.app_id,
+        **skill_vars,
+    )
+
+    # Stack modifiers: look at the cloned repo (go.mod, tsconfig.json, ...) and
+    # mix in short language notes on top of the persona. Purely a bonus - if
+    # anything goes wrong here the run continues without them.
+    modifier_block = ""
+    modifier_slugs: list[str] = []
+    try:
+        modifier_slugs = skills_store.detect_modifiers(repo_dir)
+        log_event(
+            "agent",
+            f"Stack modifiers: {', '.join(modifier_slugs) or 'none detected'}",
+        )
+        if modifier_slugs:
+            modifier_block = (
+                f"--- STACK NOTES: {', '.join(modifier_slugs)} ---\n"
+                f"{skills_store.render_modifiers(modifier_slugs, **skill_vars)}\n"
+                f"--- END STACK NOTES ---\n\n"
+            )
+    except Exception as e:
+        log_event("agent", f"Stack modifiers skipped: {e}", "warning")
 
     # Build task from ticket
     task_prompt = (
         f"--- PERSONA: {persona} ---\n"
         f"{persona_content}\n"
         f"--- END PERSONA ---\n\n"
+        f"{modifier_block}"
         f"Ticket {resolved_key}: {summary}\n\n"
         f"Description: {description}\n\n"
         f"You are working in repo: {target_repo} (branch: {target_branch})\n"
@@ -716,9 +998,9 @@ def run_pipeline(
         )
 
     from openhands.sdk import Agent, Conversation, Tool
-    from openhands.tools.terminal import TerminalTool
     from openhands.tools.file_editor import FileEditorTool
     from openhands.tools.task_tracker import TaskTrackerTool
+    from openhands.tools.terminal import TerminalTool
 
     agent_llm = LLM(
         model=cfg.azure_model,
@@ -741,23 +1023,25 @@ def run_pipeline(
         callbacks=[_make_agent_event_logger(on_step)],
     )
 
-    print(f"  Agent workspace: {repo_dir}")
-    print(f"  Task: {task_prompt[:200]}...")
     os.environ["GIT_TERMINAL_PROMPT"] = "0"
 
     try:
         conversation.send_message(task_prompt)
         conversation.run()
-        print("  [OK] Agent run completed")
     except Exception as e:
         msg = f"Agent run failed: {str(e)[:300]}"
         on_step("agent", "human", msg)
         post_comment(msg, "agent", "human")
         set_ticket_status(cfg.status_failed, "agent", "human")
         raise PipelineHalt("human", msg)
+    finally:
+        report_usage(
+            "agent",
+            conversation.conversation_stats.get_combined_metrics(),
+        )
 
-    # ── STEP 4: VERIFY SUCCESS ─────────────────────────────────────
-    step("6/8  VERIFY — Checking agent's work")
+    # ── STEP 4: VERIFY ────────────────────────────────────────────
+    on_step("verify", "in-progress", "Reviewing agent's changes")
 
     # Combine three sources of change, each queried with a dedicated
     # `--name-only`-style command so every path comes back unprefixed —
@@ -780,13 +1064,13 @@ def run_pipeline(
 
     if not modified_files:
         msg = "Agent made no changes to the repository."
-        print(f"  !! {msg}")
         on_step("agent", "human", msg)
         post_comment(msg, "agent", "human")
         set_ticket_status(cfg.status_failed, "agent", "human")
         raise PipelineHalt("human", msg)
 
-    print(f"  [OK] Modified files: {modified_files}")
+    on_step("agent", "success", f"Modified: {', '.join(modified_files)}")
+    on_step("verify", "in-progress", "Checking package requirements and change hygiene")
 
     # Guardrail policy — enforced on what actually changed, not just asked for
     # in the prompt. Nothing has been committed or pushed at this point.
@@ -796,7 +1080,7 @@ def run_pipeline(
             f"Guardrail blocked this change — the agent modified protected path(s): {', '.join(violations)} "
             f"(policy for {cfg.app_name}: {', '.join(cfg.protected_paths)}). Nothing was pushed."
         )
-        print(f"  !! {msg}")
+        log_event("agent", msg, "warning")
         on_step("agent", "human", f"[GUARDRAIL] {msg}")
         post_comment(msg, "agent", "human")
         set_ticket_status(cfg.status_failed, "agent", "human")
@@ -804,7 +1088,7 @@ def run_pipeline(
 
     # Point 11: the app's own test command is the real gate — the agent
     # saying "done" isn't enough.
-    verification = "No automated tests are configured for this application — review the diff."
+    verification = "none configured for this application — review the diff."
     if cfg.verify_mode == "command":
         on_step("agent", "in-progress", f"[TESTS] Running {cfg.test_command}")
         t0 = time.monotonic()
@@ -813,7 +1097,7 @@ def run_pipeline(
         if rc_tests != 0:
             why = f"timed out after {cfg.test_timeout_min} min" if rc_tests is None else f"failed (exit code {rc_tests})"
             msg = f"Tests {why}: `{cfg.test_command}`. Nothing was pushed."
-            print(f"  !! {msg}")
+            log_event("agent", msg, "warning")
             on_step("agent", "human", f"[TESTS-OUTPUT]\n{_tail(test_out)}")
             on_step("agent", "human", f"[TESTS] ✗ {msg}")
             post_comment(f"{msg}\n\nLast lines of output:\n{_tail(test_out, 15)}", "agent", "human")
@@ -838,14 +1122,136 @@ def run_pipeline(
                 failed.append(pkg_spec)
         if failed:
             msg = f"Agent modified requirements.txt but some new packages failed pip validation: {', '.join(failed)}"
-            print(f"  !! {msg}")
-            on_step("agent", "human", msg)
-            post_comment(msg, "agent", "human")
-            set_ticket_status(cfg.status_failed, "agent", "human")
+            on_step("verify", "human", msg)
+            post_comment(msg, "verify", "human")
+            set_ticket_status(cfg.status_failed, "verify", "human")
             raise PipelineHalt("human", msg)
 
-    print("  [OK] Work verified successfully")
-    on_step("agent", "success", f"Modified: {', '.join(modified_files)}")
+    try:
+        verification_diff = _collect_verification_diff(repo_dir, base_commit)
+    except RuntimeError as e:
+        msg = f"Could not prepare changes for verification: {e}"
+        on_step("verify", "human", msg)
+        post_comment(msg, "verify", "human")
+        set_ticket_status(cfg.status_failed, "verify", "human")
+        raise PipelineHalt("human", msg) from e
+
+    diff_check = subprocess.run(
+        ["git", "diff", "--check", base_commit],
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if diff_check.returncode != 0:
+        check_output = diff_check.stdout or diff_check.stderr
+        normalized_paths = _normalize_reported_eof_blank_lines(
+            repo_dir,
+            modified_files,
+            check_output,
+        )
+        if normalized_paths:
+            normalized_message = "Normalized reported whitespace in: " + ", ".join(
+                normalized_paths
+            )
+            on_step("verify", "in-progress", normalized_message)
+            diff_check = subprocess.run(
+                ["git", "diff", "--check", base_commit],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+    if diff_check.returncode != 0:
+        msg = f"Whitespace/conflict-marker check failed: {diff_check.stdout or diff_check.stderr}"
+        on_step("verify", "human", msg[:1500])
+        post_comment(msg[:1500], "verify", "human")
+        set_ticket_status(cfg.status_failed, "verify", "human")
+        raise PipelineHalt("human", msg)
+
+    try:
+        verify_persona = skills_store.select_persona(
+            summary,
+            description,
+            stage="verify",
+            app_id=cfg.app_id,
+        )
+        verify_skill_vars = {
+            **skill_vars,
+            "PERSONA": verify_persona,
+        }
+        verify_persona_content = skills_store.render_skill(
+            verify_persona,
+            stage="verify",
+            app_id=cfg.app_id,
+            **verify_skill_vars,
+        )
+        verify_modifier_block = ""
+        if modifier_slugs:
+            verify_modifier_block = (
+                f"--- STACK NOTES: {', '.join(modifier_slugs)} ---\n"
+                f"{skills_store.render_modifiers(modifier_slugs, **verify_skill_vars)}\n"
+                f"--- END STACK NOTES ---\n\n"
+            )
+    except skills_store.SkillValidationError as e:
+        msg = f"Verification persona could not be loaded: {e}"
+        on_step("verify", "human", msg)
+        post_comment(msg, "verify", "human")
+        set_ticket_status(cfg.status_failed, "verify", "human")
+        raise PipelineHalt("human", msg) from e
+
+    verification_prompt = (
+        f"--- VERIFICATION PERSONA: {verify_persona} ---\n"
+        f"{verify_persona_content}\n"
+        f"--- END VERIFICATION PERSONA ---\n\n"
+        f"{verify_modifier_block}"
+        f"Verify ticket {resolved_key}: {summary}\n\n"
+        f"Ticket requirements:\n{description}\n\n"
+        f"Changed files: {', '.join(modified_files)}\n\n"
+        "Review the complete diff below against the ticket requirements. "
+        "Look for concrete correctness defects, missing behavior, regressions, "
+        "unsafe changes, and inadequate or absent tests. This is a read-only "
+        "review: do not edit or execute repository code. Do not claim tests "
+        "were run; judge only the supplied diff and test changes. PASS only "
+        "when there is no blocking defect apparent in the diff. If uncertain, "
+        "FAIL and explain what needs human investigation.\n\n"
+        "The first non-empty line of your response MUST be exactly "
+        "`VERDICT: PASS` or `VERDICT: FAIL`. After that, give a concise "
+        "review summary and list any blocking findings with file paths.\n\n"
+        f"--- DIFF START ---\n{verification_diff}\n--- DIFF END ---"
+    )
+    log_event("verify", f"Verification persona: {verify_persona}")
+    try:
+        verification_response = _run_verification_agent(
+            agent_llm,
+            repo_dir,
+            verification_prompt,
+            on_step,
+            on_usage,
+        )
+    except Exception as e:
+        msg = f"Verification agent failed: {str(e)[:300]}"
+        on_step("verify", "human", msg)
+        post_comment(msg, "verify", "human")
+        set_ticket_status(cfg.status_failed, "verify", "human")
+        raise PipelineHalt("human", msg) from e
+
+    verdict = _verification_verdict(verification_response)
+    if verdict != "PASS":
+        review_details = verification_response.strip()[:1500]
+        if verdict is None:
+            review_details = (
+                "Reviewer did not return the required explicit PASS/FAIL verdict. "
+                + review_details
+            )
+        msg = f"Verification review requires human attention.\n{review_details}"
+        on_step("verify", "human", msg)
+        post_comment(msg, "verify", "human")
+        set_ticket_status(cfg.status_failed, "verify", "human")
+        raise PipelineHalt("human", msg)
+
+    review_summary = verification_response.strip()[:1500]
+    on_step("verify", "success", review_summary)
 
     # ── APPROVAL GATE (per app) ────────────────────────────────────
     if cfg.require_pr_approval:
@@ -863,17 +1269,16 @@ def run_pipeline(
                 msg = "Approval request timed out — no one approved the change, so no PR was opened."
             else:
                 msg = f"PR rejected by @{actor}" + (f": {note}" if note else "") + " — no PR was opened."
-            print(f"  !! {msg}")
+            log_event("pr", msg, "warning")
             on_step("pr", "human", msg)
             post_comment(msg, "pr", "human")
             set_ticket_status(cfg.status_failed, "pr", "human")
             raise PipelineHalt("human", msg)
         on_step("pr", "in-progress", f"Approved by @{actor}" + (f": {note}" if note else ""))
-        print(f"  [OK] Approved by @{actor}")
+        log_event("pr", f"Approved by @{actor}")
 
     # ── STEP 5: PR CREATION ─────────────────────────────────────────
-    on_step("pr", "in-progress")
-    step("7/8  PR — Creating branch, committing, and opening PR")
+    on_step("pr", "in-progress", "Creating branch and opening pull request")
 
     # Collapse any run of non-alphanumeric characters to a single hyphen (not
     # just spaces/periods) — a ticket title routinely has ':', '/', '(', etc.
@@ -891,7 +1296,6 @@ def run_pipeline(
         # discovering the problem at push time ("src refspec ... does not
         # match any") — which used to be the only symptom of this failing.
         msg = f"Failed to create branch {branch_name}: {err[:300]}"
-        print(f"  !! {msg}")
         on_step("pr", "failed", msg)
         post_comment(msg, "pr", "failed")
         raise PipelineHalt("failed", msg)
@@ -908,23 +1312,20 @@ def run_pipeline(
         _, head_now, _ = run_cmd(["git", "rev-parse", "HEAD"], repo_dir)
         if head_now.strip() == base_commit:
             msg = "Nothing to commit (already up to date)"
-            print(f"  ⚠️  {msg}")
             on_step("pr", "human", msg)
             post_comment(msg, "pr", "human")
             raise PipelineHalt("human", msg)
-        print("  [OK] Agent already committed its changes; nothing further to stage")
+        log_event("pr", "Agent already committed its changes; no additional commit needed")
 
     push_url = f"https://{cfg.github_token}@github.com/{target_repo}.git"
-    print(f"  Git push to: https://<token>@github.com/{target_repo}.git {branch_name}")
-    rc, out, err = run_cmd(["git", "push", push_url, branch_name], repo_dir)
+    rc, out, err = run_cmd(["git", "push", push_url, branch_name], repo_dir, silent=True)
     if rc != 0:
         msg = f"Push failed: {err[:300]}"
-        print(f"  !! {msg}")
         on_step("pr", "failed", msg)
         post_comment(msg, "pr", "failed")
         raise PipelineHalt("failed", msg)
 
-    print(f"  [OK] Pushed branch: {branch_name}")
+    log_event("pr", f"Pushed branch: {branch_name}")
 
     pr_title = f"{resolved_key}: {summary}"
     pr_body = (
@@ -934,18 +1335,27 @@ def run_pipeline(
         f"**Changes**:\n"
         f"- Modified files: {', '.join(modified_files)}\n\n"
         f"**Verification**:\n"
-        f"- {verification}\n"
-        f"- Ready for human review.\n"
+        f"- Automated verification review: PASS ({verify_persona})\n"
+        f"- `git diff --check`: PASS\n"
+        f"- Tests: {verification}\n\n"
+        f"Ready for human review.\n"
     )
 
-    pr_data = gh_api(cfg.github_token, "POST", f"/repos/{target_repo}/pulls", {
-        "title": pr_title,
-        "head": branch_name,
-        "base": target_branch,
-        "body": pr_body,
-    })
-    pr_url = pr_data.get("html_url", "")
-    print(f"  [OK] PR created: {pr_url}")
+    try:
+        pr_url = _create_pull_request(
+            cfg.github_token,
+            target_repo,
+            pr_title,
+            branch_name,
+            target_branch,
+            pr_body,
+        )
+    except (requests.RequestException, RuntimeError) as e:
+        msg = f"Failed to open pull request: {str(e)[:300]}"
+        on_step("pr", "failed", msg)
+        post_comment(msg, "pr", "failed")
+        raise PipelineHalt("failed", msg) from e
+    log_event("pr", f"PR created: {pr_url}")
 
     if cfg.verify_mode == "github_actions":
         on_step("pr", "in-progress", pr_url)
@@ -969,7 +1379,7 @@ def run_pipeline(
                 "none": "No CI checks ran for this PR — check the repository's GitHub Actions triggers",
                 "timeout": f"CI didn't finish within {cfg.test_timeout_min} min",
             }[outcome]
-            print(f"  !! {msg}")
+            log_event("pr", msg, "warning")
             on_step("pr", "human", f"[CI] ✗ {msg}")
             post_comment(f"{msg}.\n\n**Pull Request**: {pr_url}", "pr", "human")
             set_ticket_status(cfg.status_failed, "pr", "human")
@@ -980,24 +1390,18 @@ def run_pipeline(
     on_step("pr", "success", pr_url)
 
     # ── STEP 6: REPORT BACK ───────────────────────────────────────
-    on_step("jira", "in-progress")
-    step("8/8  REPORT — Updating ticket")
+    on_step("jira", "in-progress", "Updating ticket with completion details")
 
     completion_comment = (
         f"Agent completed work on this ticket.\n\n"
         f"**Pull Request**: {pr_url}\n\n"
         f"**Files modified**: {', '.join(modified_files)}\n"
-        f"**Verification**: {verification}"
+        f"**Verification**: automated review PASS ({verify_persona}). Tests: {verification}"
     )
 
     on_step("jira", "success", f"{resolved_key} -> {cfg.status_done}")
     post_comment(completion_comment, "jira", "success")
     set_ticket_status(cfg.status_done, "jira", "success")
-
-    print(f"\n{'=' * 60}")
-    print(f"  [OK] DONE — {resolved_key} is now {cfg.status_done}")
-    print(f"  PR: {pr_url}")
-    print(f"{'=' * 60}")
 
     return {"status": "success", "ticket_key": resolved_key, "pr_url": pr_url, "modified_files": modified_files}
 
@@ -1006,7 +1410,10 @@ def main():
     try:
         run_pipeline()
     except PipelineHalt as e:
-        print(f"  !! {e.status.upper()}: {e.message}")
+        logger.error(
+            "Pipeline halted",
+            extra={"status": e.status, "message": e.message},
+        )
         sys.exit(0)
 
 
