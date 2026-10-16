@@ -1,4 +1,4 @@
-export type RunStatus = 'pending' | 'in-progress' | 'success' | 'failed' | 'error' | 'human';
+export type RunStatus = 'pending' | 'in-progress' | 'awaiting-approval' | 'success' | 'failed' | 'error' | 'human';
 
 export default function StatusBadge({ status }: { status: string }) {
   const s = status as RunStatus;
@@ -12,6 +12,8 @@ export default function StatusBadge({ status }: { status: string }) {
       return <span className="badge failed">{dot} {s === 'error' ? 'Error' : 'Failed'}</span>;
     case 'human':
       return <span className="badge human">{dot} Human In Loop</span>;
+    case 'awaiting-approval':
+      return <span className="badge approval">{dot} Awaiting approval</span>;
     case 'in-progress':
       return <span className="badge in-progress">{dot} Running</span>;
     default:

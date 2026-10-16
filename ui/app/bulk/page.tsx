@@ -202,7 +202,7 @@ export default function BulkRequestPage() {
       const run = latestByTicket.get(id);
       if (!run) notRun++;
       else if (run.status === 'success') success++;
-      else if (run.status === 'in-progress') running++;
+      else if (run.status === 'in-progress' || run.status === 'awaiting-approval') running++;
       else failed++;
     }
     return { success, failed, running, notRun };

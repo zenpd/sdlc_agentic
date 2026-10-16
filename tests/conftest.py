@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from backend import apps_store, audit_store, oauth_store, runs_db, users_store
+from backend import apps_store, audit_store, oauth_store, runs_db, teams_store, users_store
 
 _TMP_DB = Path(tempfile.mkdtemp(prefix="sdlc_test_")) / "runs.db"
-for _mod in (runs_db, oauth_store, apps_store, users_store, audit_store):
+for _mod in (runs_db, oauth_store, apps_store, users_store, audit_store, teams_store):
     _mod.DB_PATH = _TMP_DB
 
 from fastapi.testclient import TestClient  # noqa: E402
@@ -43,11 +43,11 @@ def sign_in(login: str, role: str | None = None) -> None:
 @pytest.fixture(autouse=True)
 def clean_state(monkeypatch):
     conn = apps_store._get_conn()
-    for table in ("applications", "runs", "users", "audit_log", "github_sessions"):
+    for table in ("applications", "runs", "users", "audit_log", "github_sessions", "teams", "team_members"):
         conn.execute(f"DROP TABLE IF EXISTS {table}")
     conn.commit()
     conn.close()
-    for store in (runs_db, apps_store, users_store, audit_store, oauth_store):
+    for store in (runs_db, teams_store, apps_store, users_store, audit_store, oauth_store):
         store.init_db()
     client.cookies.clear()
     monkeypatch.delenv("ADMIN_LOGINS", raising=False)

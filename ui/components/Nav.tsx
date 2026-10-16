@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
-import { getStats, logoutGithub, type Role } from '@/lib/api';
+import { getStats, logoutGithub, updatePreferences, type Role } from '@/lib/api';
 import { useActiveApp } from '@/components/AppContext';
 
 export const appInitials = (name: string) =>
@@ -18,6 +18,7 @@ const NAV_ITEMS: Array<{ label: string; href: string; icon: string; color: strin
   { label: 'Skills', href: '/skills', icon: 'award', color: '#ec4899' },
   { label: 'Config', href: '/config', icon: 'settings', color: '#f97316' },
   { label: 'Activity', href: '/activity', icon: 'activity', color: '#14b8a6', minRole: 'maintainer' },
+  { label: 'Teams', href: '/teams', icon: 'teams', color: '#0891b2', minRole: 'admin' },
   { label: 'Users', href: '/users', icon: 'users', color: '#6366f1', minRole: 'admin' },
 ];
 
@@ -46,6 +47,8 @@ function NavIcon({ name }: { name: string }) {
       return <svg {...STROKE}><circle cx="12" cy="8" r="6" /><polyline points="8.21 13.89 7 23 12 20 17 23 15.79 13.88" /></svg>;
     case 'activity':
       return <svg {...STROKE}><path d="M12 8v4l3 2" /><circle cx="12" cy="12" r="9" /></svg>;
+    case 'teams':
+      return <svg {...STROKE}><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></svg>;
     case 'users':
       return <svg {...STROKE}><circle cx="9" cy="8" r="4" /><path d="M2 21a7 7 0 0 1 14 0" /><path d="M16 4a4 4 0 0 1 0 8M22 21a7 7 0 0 0-4-6.3" /></svg>;
     case 'settings':
@@ -67,11 +70,24 @@ export default function Nav() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [switcherOpen, setSwitcherOpen] = useState(false);
-  const { apps, activeApp, activeAppId, setActiveAppId, me: githubUser, can } = useActiveApp();
+  const { apps, teamApps, teams, activeTeamId, setActiveTeamId, activeApp, activeAppId, setActiveAppId, me: githubUser, can } = useActiveApp();
   const [backendUp, setBackendUp] = useState<boolean | null>(null);
   const [query, setQuery] = useState('');
   const searchRef = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+
+  // A theme saved on the Account page follows the user to any browser.
+  const savedTheme = githubUser?.preferences?.theme;
+  useEffect(() => {
+    if (!savedTheme) return;
+    const next = savedTheme === 'system' ? window.matchMedia('(prefers-color-scheme: dark)').matches : savedTheme === 'dark';
+    document.documentElement.classList.toggle('dark', next);
+    setDark(next);
+    try {
+      if (savedTheme === 'system') localStorage.removeItem('theme');
+      else localStorage.setItem('theme', savedTheme);
+    } catch { /* ignore */ }
+  }, [savedTheme]);
 
   useEffect(() => {
     setDark(document.documentElement.classList.contains('dark'));
@@ -126,6 +142,7 @@ export default function Nav() {
     setDark(next);
     document.documentElement.classList.toggle('dark', next);
     localStorage.setItem('theme', next ? 'dark' : 'light');
+    updatePreferences({ theme: next ? 'dark' : 'light' }).catch(() => {});
   };
 
   const handleLogout = async () => {
@@ -194,14 +211,22 @@ export default function Nav() {
               <div className="account-menu app-menu">
                 <div className="account-menu-head">
                   <small>Switch application</small>
-                  <b>{apps.length} onboarded</b>
+                  <b>{teamApps.length} of {apps.length} you can access</b>
                 </div>
-                {apps.map((a) => (
+                {teams.length > 0 && (
+                  <div className="team-filter">
+                    <button className={!activeTeamId ? 'on' : ''} onClick={() => setActiveTeamId('')}>All teams</button>
+                    {teams.map((t) => (
+                      <button key={t.id} className={activeTeamId === t.id ? 'on' : ''} onClick={() => setActiveTeamId(t.id)}>{t.name}</button>
+                    ))}
+                  </div>
+                )}
+                {teamApps.map((a) => (
                   <button key={a.id} className={`app-option${a.id === activeAppId ? ' active' : ''}`} onClick={() => switchApp(a.id)}>
                     <span className="app-avatar">{appInitials(a.name)}</span>
                     <span className="app-option-text">
                       {a.name}
-                      <span>{a.ticket_provider === 'ado' ? 'Azure DevOps' : 'Jira'} · {a.target_repo || 'no repository yet'}</span>
+                      <span>{a.team || 'Shared'} · {a.ticket_provider === 'ado' ? 'Azure DevOps' : 'Jira'} · {a.target_repo || 'no repository yet'}</span>
                     </span>
                     {a.id === activeAppId && <span className="app-option-check">✓</span>}
                   </button>
@@ -234,6 +259,7 @@ export default function Nav() {
                 <b>{githubUser ? `@${githubUser.login}` : 'Unknown user'}</b>
                 {githubUser && <span className={`role-badge ${githubUser.role}`}>{githubUser.role}</span>}
               </div>
+              <Link href="/account" onClick={() => setMenuOpen(false)}>Account settings</Link>
               <Link href="/applications" onClick={() => setMenuOpen(false)}>Manage applications</Link>
               <button onClick={handleLogout}>Log out</button>
             </div>

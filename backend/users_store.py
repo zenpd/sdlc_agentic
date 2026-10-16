@@ -16,6 +16,7 @@ everyone else starts as DEFAULT_USER_ROLE (viewer unless overridden) until an
 admin raises them on the Users page.
 """
 
+import json
 import os
 import sqlite3
 import threading
@@ -27,6 +28,11 @@ DB_PATH = Path(__file__).parent / "runs.db"
 _lock = threading.Lock()
 
 ROLES = ["viewer", "runner", "maintainer", "admin"]
+
+# Per-user settings kept server-side so they follow the person to a new
+# device or browser (localStorage alone doesn't).
+THEMES = ("light", "dark", "system")
+PREFERENCE_KEYS = ("default_app_id", "theme", "active_team_id")
 
 
 class LastAdminError(ValueError):
@@ -64,8 +70,17 @@ def init_db() -> None:
         )
         """
     )
+    columns = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+    if "preferences" not in columns:
+        conn.execute("ALTER TABLE users ADD COLUMN preferences TEXT NOT NULL DEFAULT '{}'")
     conn.commit()
     conn.close()
+
+
+def _with_prefs(row: sqlite3.Row) -> dict:
+    user = dict(row)
+    user["preferences"] = json.loads(user.get("preferences") or "{}")
+    return user
 
 
 def _admin_logins() -> set[str]:
@@ -97,7 +112,7 @@ def ensure_user(login: str, avatar_url: Optional[str] = None) -> dict:
                     (login, avatar_url, role, _now(), _now()),
                 )
             conn.commit()
-            return dict(conn.execute("SELECT * FROM users WHERE login = ?", (login,)).fetchone())
+            return _with_prefs(conn.execute("SELECT * FROM users WHERE login = ?", (login,)).fetchone())
         finally:
             conn.close()
 
@@ -108,7 +123,7 @@ def get_user(login: str) -> Optional[dict]:
     conn.close()
     if not row:
         return None
-    user = dict(row)
+    user = _with_prefs(row)
     # ADMIN_LOGINS is authoritative, so locking yourself out is always recoverable from .env.
     if login.lower() in _admin_logins():
         user["role"] = "admin"
@@ -119,7 +134,7 @@ def list_users() -> list[dict]:
     conn = _get_conn()
     rows = conn.execute("SELECT * FROM users ORDER BY created_at ASC").fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    return [_with_prefs(r) for r in rows]
 
 
 def set_role(login: str, role: str) -> dict:
@@ -137,6 +152,33 @@ def set_role(login: str, role: str) -> dict:
                     raise LastAdminError("Can't remove the last admin — make someone else an admin first")
             conn.execute("UPDATE users SET role = ? WHERE login = ?", (role, login))
             conn.commit()
-            return dict(conn.execute("SELECT * FROM users WHERE login = ?", (login,)).fetchone())
+            return _with_prefs(conn.execute("SELECT * FROM users WHERE login = ?", (login,)).fetchone())
+        finally:
+            conn.close()
+
+
+def update_preferences(login: str, updates: dict) -> dict:
+    """Merge validated preference values into the user's saved preferences.
+    A value of "" or None removes that preference (back to the default)."""
+    unknown = set(updates) - set(PREFERENCE_KEYS)
+    if unknown:
+        raise ValueError(f"Unknown preference(s): {', '.join(sorted(unknown))}")
+    if updates.get("theme") and updates["theme"] not in THEMES:
+        raise ValueError(f"Theme must be one of: {', '.join(THEMES)}")
+    with _lock:
+        conn = _get_conn()
+        try:
+            row = conn.execute("SELECT preferences FROM users WHERE login = ?", (login,)).fetchone()
+            if not row:
+                raise KeyError(login)
+            prefs = json.loads(row["preferences"] or "{}")
+            for key, value in updates.items():
+                if value:
+                    prefs[key] = value
+                else:
+                    prefs.pop(key, None)
+            conn.execute("UPDATE users SET preferences = ? WHERE login = ?", (json.dumps(prefs), login))
+            conn.commit()
+            return prefs
         finally:
             conn.close()

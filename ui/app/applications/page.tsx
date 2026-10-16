@@ -95,7 +95,7 @@ function AppCard({
         <span className="app-avatar lg">{appInitials(app.name)}</span>
         <div style={{ minWidth: 0 }}>
           <h3>{app.name}</h3>
-          <p>{app.team || (app.is_default ? 'Server-wide settings' : 'No team set')}</p>
+          <p>{app.team ? `Team · ${app.team}` : 'Shared with everyone'}</p>
         </div>
         {active && <span className="active-tag">ACTIVE</span>}
       </div>
@@ -103,6 +103,10 @@ function AppCard({
         <span className="chip purple">{app.ticket_provider === 'ado' ? 'Azure DevOps' : 'Jira'}</span>
         <span className="chip" title={app.target_repo}>{app.target_repo ? `${app.target_repo} · ${app.target_branch}` : 'No repository yet'}</span>
         <span className="chip">{app.default_persona ? `persona · ${app.default_persona}` : 'persona · auto'}</span>
+        {app.require_pr_approval && <span className="chip purple">🛡️ approval before PR</span>}
+        {app.protected_paths && <span className="chip" title={app.protected_paths}>🔒 protected paths</span>}
+        {app.verify_mode === 'command' && <span className="chip" title="Tests run before any PR opens">🧪 {app.test_command}</span>}
+        {app.verify_mode === 'github_actions' && <span className="chip">⚙️ GitHub Actions{app.ci_workflow ? ` · ${app.ci_workflow}` : ''}</span>}
       </div>
       <div style={{ display: 'flex', gap: 14, fontSize: 12, fontWeight: 700 }}>
         {canConfigure && <Link href="/config" className="link-btn" onClick={(e) => { e.stopPropagation(); onSelect(); }}>Configure →</Link>}
@@ -121,15 +125,18 @@ function AppCard({
 }
 
 const EMPTY_FORM = {
-  name: '', team: '', description: '',
+  name: '', team_id: '', description: '',
   TICKET_PROVIDER: 'ado' as 'jira' | 'ado',
-  JIRA_BASE_URL: '', JIRA_USER_EMAIL: '', JIRA_API_TOKEN: '', JIRA_JQL: '',
-  ADO_ORG_URL: '', ADO_PROJECT: '', ADO_PAT: '', ADO_ASSIGNEE: '',
+  JIRA_BASE_URL: '', JIRA_USER_EMAIL: '', JIRA_API_TOKEN: '',
+  ADO_ORG_URL: '', ADO_PROJECT: '', ADO_PAT: '',
   DEFAULT_PERSONA: '', BRANCH_PREFIX: '', GATE_MIN_WORDS: '',
+  REQUIRE_PR_APPROVAL: '', PROTECTED_PATHS: '',
+  VERIFY_MODE: '', TEST_COMMAND: '',
 };
 
 function OnboardModal({ onClose, onCreated }: { onClose: () => void; onCreated: (app: Application) => void }) {
-  const [form, setForm] = useState(EMPTY_FORM);
+  const { teams, activeTeamId } = useActiveApp();
+  const [form, setForm] = useState({ ...EMPTY_FORM, team_id: activeTeamId });
   const [skills, setSkills] = useState<SkillSummary[]>([]);
   const [serverDefaults, setServerDefaults] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
@@ -153,14 +160,14 @@ function OnboardModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
     setSaving(true);
     setError(null);
     const providerKeys = form.TICKET_PROVIDER === 'ado'
-      ? ['ADO_ORG_URL', 'ADO_PROJECT', 'ADO_PAT', 'ADO_ASSIGNEE'] as const
-      : ['JIRA_BASE_URL', 'JIRA_USER_EMAIL', 'JIRA_API_TOKEN', 'JIRA_JQL'] as const;
+      ? ['ADO_ORG_URL', 'ADO_PROJECT', 'ADO_PAT'] as const
+      : ['JIRA_BASE_URL', 'JIRA_USER_EMAIL', 'JIRA_API_TOKEN'] as const;
     const config: AppConfigUpdate = { TICKET_PROVIDER: form.TICKET_PROVIDER };
-    for (const k of [...providerKeys, 'DEFAULT_PERSONA', 'BRANCH_PREFIX', 'GATE_MIN_WORDS'] as const) {
+    for (const k of [...providerKeys, 'DEFAULT_PERSONA', 'BRANCH_PREFIX', 'GATE_MIN_WORDS', 'REQUIRE_PR_APPROVAL', 'PROTECTED_PATHS', 'VERIFY_MODE', 'TEST_COMMAND'] as const) {
       if (form[k].trim()) config[k] = form[k].trim();
     }
     try {
-      const app = await createApp({ name: form.name, team: form.team, description: form.description, config });
+      const app = await createApp({ name: form.name, team_id: form.team_id || null, description: form.description, config });
       onCreated(app);
     } catch (e: any) {
       setError(e.message);
@@ -188,7 +195,11 @@ function OnboardModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
           </div>
           <div>
             <label className="label-main">Team</label>
-            <input className="input-main" value={form.team} onChange={set('team')} placeholder="Payments" />
+            <select className="input-main" value={form.team_id} onChange={set('team_id')}>
+              <option value="">Shared — everyone can use it</option>
+              {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+            <div className="field-hint">Only this team&apos;s members (and admins) will see it</div>
           </div>
           <div style={{ gridColumn: '1 / -1' }}>
             <label className="label-main">Description</label>
@@ -223,10 +234,6 @@ function OnboardModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
                 <input className="input-main" type="password" autoComplete="new-password" value={form.ADO_PAT} onChange={set('ADO_PAT')} placeholder="••••••••" />
                 <div className="field-hint">Blank = server default token</div>
               </div>
-              <div>
-                <label className="label-main">Assignee (optional)</label>
-                <input className="input-main" value={form.ADO_ASSIGNEE} onChange={set('ADO_ASSIGNEE')} placeholder="bot@company.com" />
-              </div>
             </>
           ) : (
             <>
@@ -244,10 +251,6 @@ function OnboardModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
                 <label className="label-main">Jira API token</label>
                 <input className="input-main" type="password" autoComplete="new-password" value={form.JIRA_API_TOKEN} onChange={set('JIRA_API_TOKEN')} placeholder="••••••••" />
                 <div className="field-hint">Blank = server default token</div>
-              </div>
-              <div>
-                <label className="label-main">JQL (optional)</label>
-                <input className="input-main" value={form.JIRA_JQL} onChange={set('JIRA_JQL')} placeholder='labels = "Agent-ready"' />
               </div>
             </>
           )}
@@ -268,6 +271,37 @@ function OnboardModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
             <label className="label-main">Clarity gate — min. words</label>
             <input className="input-main" inputMode="numeric" value={form.GATE_MIN_WORDS} onChange={set('GATE_MIN_WORDS')} placeholder="5" />
           </div>
+
+          <div className="form-section-label">Verification</div>
+          <div>
+            <label className="label-main">How to verify the agent&apos;s change</label>
+            <select className="input-main" value={form.VERIFY_MODE} onChange={set('VERIFY_MODE')}>
+              <option value="">Review the diff only</option>
+              <option value="command">Run a test command</option>
+              <option value="github_actions">Wait for GitHub Actions</option>
+            </select>
+          </div>
+          {form.VERIFY_MODE === 'command' && (
+            <div>
+              <label className="label-main">Test command</label>
+              <input className="input-main" value={form.TEST_COMMAND} onChange={set('TEST_COMMAND')} placeholder="pytest -q" />
+              <div className="field-hint">Setup command & timeout: on the Config page</div>
+            </div>
+          )}
+
+          <div className="form-section-label">Governance</div>
+          <div>
+            <label className="label-main">Approval before pull request</label>
+            <select className="input-main" value={form.REQUIRE_PR_APPROVAL} onChange={set('REQUIRE_PR_APPROVAL')}>
+              <option value="">Not required</option>
+              <option value="true">Required — a maintainer approves</option>
+            </select>
+          </div>
+          <div>
+            <label className="label-main">Protected paths</label>
+            <input className="input-main" value={form.PROTECTED_PATHS} onChange={set('PROTECTED_PATHS')} placeholder=".github/workflows/*, *.tf" />
+            <div className="field-hint">The agent may never change these</div>
+          </div>
         </div>
 
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 24 }}>
@@ -284,7 +318,7 @@ function OnboardModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
 function ApplicationsContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { apps, activeApp, activeAppId, setActiveAppId, refreshApps, me, can } = useActiveApp();
+  const { apps, teamApps, teams, activeTeamId, setActiveTeamId, activeApp, activeAppId, setActiveAppId, refreshApps, me, can } = useActiveApp();
   const isAdmin = can('admin');
   const canPickRepo = can('maintainer');
   const [user, setUser] = useState<GithubUser | null | undefined>(undefined);
@@ -395,8 +429,17 @@ function ApplicationsContent() {
           </div>
         )}
 
+        {teams.length > 0 && (
+          <div className="segmented" style={{ marginBottom: 16 }}>
+            <button className={!activeTeamId ? 'on' : ''} onClick={() => setActiveTeamId('')}>All teams ({apps.length})</button>
+            {teams.map((t) => (
+              <button key={t.id} className={activeTeamId === t.id ? 'on' : ''} onClick={() => setActiveTeamId(t.id)}>{t.name}</button>
+            ))}
+          </div>
+        )}
+
         <div className="app-grid">
-          {apps.map((app) => (
+          {teamApps.map((app) => (
             <AppCard
               key={app.id}
               app={app}

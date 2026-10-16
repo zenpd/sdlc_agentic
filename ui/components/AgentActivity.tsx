@@ -268,6 +268,9 @@ export default function AgentActivity({
   const modifiedLine = plainLines.find((l) => l.startsWith('Modified:'));
   const modifiedFiles = modifiedLine ? modifiedLine.replace('Modified:', '').split(',').map((s) => s.trim()).filter(Boolean) : [];
   const failLine = agentState === 'failed' || agentState === 'human' ? plainLines[plainLines.length - 1] : null;
+  // "[TESTS] ✓ pytest -q passed (12s)" / "[TESTS] ✗ Tests failed …" from the app's own test command
+  const testLine = [...plainLines].reverse().find((l) => /^\[TESTS\] [✓✗]/.test(l)) ?? null;
+  const testsPassed = testLine?.startsWith('[TESTS] ✓') ?? false;
 
   const needsHuman = gateState === 'human' || agentState === 'human' || prState === 'human';
   const humanReason = gateState === 'human'
@@ -447,6 +450,11 @@ export default function AgentActivity({
             <div style={{ fontSize: 11, color: '#8a8aa8', fontFamily: 'var(--font-mono)' }}>
               {modifiedFiles.length > 0 ? `${modifiedFiles.length} file${modifiedFiles.length > 1 ? 's' : ''} changed` : '—'}
             </div>
+            {testLine && (
+              <div title={testLine} style={{ marginTop: 4, fontSize: 11, fontFamily: 'var(--font-mono)', color: testsPassed ? '#34d399' : '#f59e0b', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                {testsPassed ? '✓ tests passed' : '✗ tests failed'}
+              </div>
+            )}
           </TraceNode>
           <TraceNode title="Pull Request" status={prState} flex={1}>
             {prUrl ? (

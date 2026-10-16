@@ -86,15 +86,17 @@ export default function DashboardPage() {
   const [runs, setRuns] = useState<RunRecord[]>([]);
   const [appConfig, setAppConfig] = useState<AppConfig | null>(null);
   const [backendUp, setBackendUp] = useState<boolean | null>(null);
-  const { activeApp, activeAppId } = useActiveApp();
+  const { activeApp, activeAppId, can } = useActiveApp();
+  const [recentScope, setRecentScope] = useState<'app' | 'mine'>('app');
+  const [myRuns, setMyRuns] = useState<RunRecord[]>([]);
 
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
       try {
-        const [s, r] = await Promise.all([getStats(activeAppId), getRuns(activeAppId)]);
+        const [s, r, mine] = await Promise.all([getStats(activeAppId), getRuns(activeAppId), getRuns(undefined, { mine: true })]);
         if (cancelled) return;
-        setStats(s); setRuns(r); setBackendUp(true);
+        setStats(s); setRuns(r); setMyRuns(mine); setBackendUp(true);
       } catch {
         if (!cancelled) setBackendUp(false);
       }
@@ -109,6 +111,8 @@ export default function DashboardPage() {
   const weekTotal = (stats?.daily ?? []).reduce((a, d) => a + d.success + d.failed, 0);
   const successRate = stats?.success_rate ?? 0;
   const latest = runs[0];
+  const awaitingApproval = runs.filter((r) => r.status === 'awaiting-approval');
+  const recentRuns = recentScope === 'mine' ? myRuns : runs;
   const config = appConfig?.effective;
   const secrets = appConfig?.secrets;
   const providerKey = config ? config.TICKET_PROVIDER || 'jira' : '';
@@ -190,18 +194,38 @@ export default function DashboardPage() {
           </Link>
         </section>
 
+        {awaitingApproval.length > 0 && (
+          <section className="approval-panel" style={{ marginBottom: 0 }}>
+            <h3>🛡️ {awaitingApproval.length} run{awaitingApproval.length > 1 ? 's' : ''} waiting for approval in {activeApp?.name ?? 'this application'}</h3>
+            <p>{can('maintainer') ? 'Review the change and approve or reject it before a pull request is opened.' : 'A maintainer or admin needs to approve these before a pull request is opened.'}</p>
+            <div className="approval-files">
+              {awaitingApproval.map((r) => (
+                <Link key={r.id} href={`/logs?run=${r.id}`} className="chip purple" style={{ textDecoration: 'none' }}>
+                  {ticketLabel(r.ticket_key)}{r.triggered_by ? ` · by @${r.triggered_by}` : ''} → review
+                </Link>
+              ))}
+            </div>
+          </section>
+        )}
+
         <section className="lower-grid">
           <article className="card-main panel">
             <div className="panel-head">
               <h3>Recent runs</h3>
-              <Link href="/logs" className="link-btn">View all →</Link>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <div className="segmented">
+                  <button className={recentScope === 'app' ? 'on' : ''} onClick={() => setRecentScope('app')}>This app</button>
+                  <button className={recentScope === 'mine' ? 'on' : ''} onClick={() => setRecentScope('mine')}>Mine</button>
+                </div>
+                <Link href="/logs" className="link-btn">View all →</Link>
+              </div>
             </div>
-            {runs.length === 0 ? (
+            {recentRuns.length === 0 ? (
               <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
-                {backendUp === false ? 'Pipeline server is unreachable.' : 'No runs yet — launch your first pipeline.'}
+                {backendUp === false ? 'Pipeline server is unreachable.' : recentScope === 'mine' ? "You haven't started any runs yet." : 'No runs yet — launch your first pipeline.'}
               </div>
             ) : (
-              runs.slice(0, 5).map((run) => {
+              recentRuns.slice(0, 5).map((run) => {
                 const { summary, persona } = parseFetch(run);
                 return (
                   <Link key={run.id} href={`/logs?run=${run.id}`} className="row-item">

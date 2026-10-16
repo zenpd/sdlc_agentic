@@ -9,6 +9,7 @@ import AgentActivity from '@/components/AgentActivity';
 import StageProgress from '@/components/StageProgress';
 import { runTicket, getRunStatus, formatDuration, type RunRecord, type StepInfo } from '@/lib/api';
 import { useActiveApp } from '@/components/AppContext';
+import ApprovalPanel from '@/components/ApprovalPanel';
 
 const STEPS: StepInfo[] = [
   { key: 'fetch', label: 'Fetching ticket', state: 'pending' },
@@ -76,6 +77,7 @@ export default function RunPage() {
   const [error, setError]       = useState<string | null>(null);
   const [running, setRunning]   = useState(false);
   const [elapsed, setElapsed]   = useState(0);
+  const [record, setRecord]     = useState<RunRecord | null>(null);
   const { activeApp, activeAppId, me, can } = useActiveApp();
   const canRun = can('runner');
 
@@ -91,6 +93,7 @@ export default function RunPage() {
     intervalRef.current = setInterval(async () => {
       try {
         const r = await getRunStatus(id);
+        setRecord(r);
         setStatus(r.status);
         setStepStates(r.steps.map((s) => s.state as any));
         setLogs(r.logs);
@@ -125,7 +128,7 @@ export default function RunPage() {
 
   const handleRun = async () => {
     if (!ticketKey.trim()) return;
-    setError(null); setRunId(null); setStatus(null);
+    setError(null); setRunId(null); setStatus(null); setRecord(null);
     setStepStates(STEPS.map(() => 'pending'));
     setLogs({}); setPrUrl(null); setDuration(null);
     setRunning(true);
@@ -189,6 +192,10 @@ export default function RunPage() {
               <span className="chip">{activeApp.ticket_provider === 'ado' ? 'Azure DevOps' : 'Jira'}</span>
               <span className="chip">{activeApp.target_repo ? `${activeApp.target_repo} · ${activeApp.target_branch}` : 'No repository yet'}</span>
               <span className="chip">{activeApp.default_persona ? `persona · ${activeApp.default_persona}` : 'persona · auto'}</span>
+              {activeApp.require_pr_approval && <span className="chip purple">🛡️ approval before PR</span>}
+              {activeApp.protected_paths && <span className="chip" title={activeApp.protected_paths}>🔒 protected paths</span>}
+              {activeApp.verify_mode === 'command' && <span className="chip" title="Tests run before any PR opens">🧪 {activeApp.test_command}</span>}
+        {activeApp.verify_mode === 'github_actions' && <span className="chip">⚙️ GitHub Actions{activeApp.ci_workflow ? ` · ${activeApp.ci_workflow}` : ''}</span>}
             </div>
           )}
           {me && !canRun && <div className="locked-note" style={{ marginTop: 14 }}>🔒 Your role is <b>{me.role}</b> — starting runs needs <b>runner</b> or higher. Ask an admin.</div>}
@@ -211,6 +218,8 @@ export default function RunPage() {
                 {status && <StatusBadge status={status} />}
               </div>
             </div>
+
+            {record && <ApprovalPanel run={record} onDecided={(r) => { setRecord(r); setStatus(r.status); }} />}
 
             <div style={{ marginBottom: 28 }}>
               <StageProgress

@@ -9,7 +9,15 @@ export type StepInfo = {
   state: StepState;
 };
 
-export type RunStatus = 'in-progress' | 'success' | 'failed' | 'error' | 'human';
+export type RunStatus = 'in-progress' | 'awaiting-approval' | 'success' | 'failed' | 'error' | 'human';
+
+// Set when the run's application requires sign-off before a PR opens.
+export type RunApproval = {
+  status: 'pending' | 'approved' | 'rejected' | 'expired';
+  by: string | null;
+  note: string | null;
+  at: string | null;
+};
 
 export type RunRecord = {
   id: string;
@@ -22,6 +30,7 @@ export type RunRecord = {
   duration_sec: number | null;
   steps: StepInfo[];
   logs: Record<string, string[]>;
+  approval: RunApproval | null;
 };
 
 export type RunStats = {
@@ -56,8 +65,21 @@ export function getStats(appId?: string): Promise<RunStats> {
   return request<RunStats>(`/api/stats${appQuery(appId)}`);
 }
 
-export function getRuns(appId?: string): Promise<RunRecord[]> {
-  return request<RunRecord[]>(`/api/runs${appQuery(appId)}`);
+// mine=true -> only runs the signed-in user started, across every application.
+export function getRuns(appId?: string, opts: { mine?: boolean } = {}): Promise<RunRecord[]> {
+  const q = new URLSearchParams();
+  if (appId) q.set('app_id', appId);
+  if (opts.mine) q.set('mine', 'true');
+  const qs = q.toString();
+  return request<RunRecord[]>(`/api/runs${qs ? `?${qs}` : ''}`);
+}
+
+export function decideApproval(runId: string, decision: 'approve' | 'reject', note = ''): Promise<RunRecord> {
+  return request<RunRecord>(`/api/runs/${encodeURIComponent(runId)}/approval`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ decision, note }),
+  });
 }
 
 export function getRunStatus(runId: string): Promise<RunRecord> {
@@ -154,20 +176,28 @@ export function updateConfig(updates: ConfigUpdate): Promise<IntegrationConfig> 
 export type Application = {
   id: string;
   name: string;
-  team: string;
+  team_id: string | null; // null = shared with everyone
+  team: string;           // team name ('' when shared)
   description: string;
   is_default: boolean;
   ticket_provider: 'jira' | 'ado';
   target_repo: string;
   target_branch: string;
   default_persona: string;
+  require_pr_approval: boolean;
+  protected_paths: string;
+  verify_mode: '' | 'command' | 'github_actions';
+  test_command: string;
+  ci_workflow: string;
   created_at: string;
   updated_at: string;
 };
 
 export const APP_SECRET_FIELDS = ['JIRA_API_TOKEN', 'ADO_PAT', 'GITHUB_TOKEN', 'AZURE_OPENAI_API_KEY'] as const;
 export type AppSecretKey = typeof APP_SECRET_FIELDS[number];
-export type AppSettingKey = Exclude<keyof IntegrationConfig, AppSecretKey> | 'DEFAULT_PERSONA' | 'BRANCH_PREFIX' | 'GATE_MIN_WORDS';
+export type AppSettingKey = Exclude<keyof IntegrationConfig, AppSecretKey>
+  | 'DEFAULT_PERSONA' | 'BRANCH_PREFIX' | 'GATE_MIN_WORDS' | 'REQUIRE_PR_APPROVAL' | 'PROTECTED_PATHS'
+  | 'VERIFY_MODE' | 'TEST_SETUP_COMMAND' | 'TEST_COMMAND' | 'TEST_TIMEOUT_MIN' | 'CI_WORKFLOW';
 
 // values = this app's own overrides ('' = not overridden), inherited = the
 // server-wide (.env) value a blank field falls back to, effective = what a
@@ -187,7 +217,7 @@ export function listApps(): Promise<Application[]> {
   return request<Application[]>('/api/apps');
 }
 
-export function createApp(body: { name: string; team?: string; description?: string; config?: AppConfigUpdate }): Promise<Application> {
+export function createApp(body: { name: string; team_id?: string | null; description?: string; config?: AppConfigUpdate }): Promise<Application> {
   return request<Application>('/api/apps', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -195,7 +225,8 @@ export function createApp(body: { name: string; team?: string; description?: str
   });
 }
 
-export function updateApp(appId: string, body: { name?: string; team?: string; description?: string }): Promise<Application> {
+// Sending team_id (a team's id, or null for shared) moves the app — admins only.
+export function updateApp(appId: string, body: { name?: string; description?: string; team_id?: string | null }): Promise<Application> {
   return request<Application>(`/api/apps/${encodeURIComponent(appId)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
@@ -234,11 +265,49 @@ export const ROLE_INFO: Record<Role, string> = {
 export const hasRole = (role: Role | undefined, minimum: Role) =>
   !!role && ROLES.indexOf(role) >= ROLES.indexOf(minimum);
 
+export type Theme = 'light' | 'dark' | 'system';
+
+// Saved server-side so they follow the person to any device or browser.
+export type UserPreferences = {
+  default_app_id?: string;
+  theme?: Theme;
+  active_team_id?: string; // narrows the app switcher to one team; never grants access
+};
+
 export type GithubUser = {
   login: string;
   avatar_url: string | null;
   role: Role;
+  preferences: UserPreferences;
 };
+
+export function updatePreferences(updates: { default_app_id?: string; theme?: Theme | ''; active_team_id?: string }): Promise<UserPreferences> {
+  return request<UserPreferences>('/api/me/preferences', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(updates),
+  });
+}
+
+export type SessionInfo = {
+  id: string;
+  user_agent: string;
+  created_at: string;
+  last_seen_at: string;
+  current: boolean;
+};
+
+export function listMySessions(): Promise<SessionInfo[]> {
+  return request<SessionInfo[]>('/api/me/sessions');
+}
+
+export function revokeMySession(id: string): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(`/api/me/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+export function signOutOtherSessions(): Promise<{ signed_out: number }> {
+  return request<{ signed_out: number }>('/api/me/sessions/sign-out-others', { method: 'POST' });
+}
 
 export type GithubRepo = {
   full_name: string;
@@ -272,6 +341,43 @@ export function selectGithubRepo(fullName: string, defaultBranch: string | undef
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ full_name: fullName, default_branch: defaultBranch, app_id: appId }),
   });
+}
+
+// ── Teams (who can see which applications) ───────────────────────────
+export type Team = {
+  id: string;
+  name: string;
+  created_at: string;
+  members: string[];
+  app_count: number;
+};
+
+export function listTeams(): Promise<Team[]> {
+  return request<Team[]>('/api/teams');
+}
+
+export function createTeam(name: string): Promise<Team> {
+  return request<Team>('/api/teams', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+}
+
+export function deleteTeam(teamId: string): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(`/api/teams/${encodeURIComponent(teamId)}`, { method: 'DELETE' });
+}
+
+export function addTeamMember(teamId: string, login: string): Promise<Team> {
+  return request<Team>(`/api/teams/${encodeURIComponent(teamId)}/members`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ login }),
+  });
+}
+
+export function removeTeamMember(teamId: string, login: string): Promise<Team> {
+  return request<Team>(`/api/teams/${encodeURIComponent(teamId)}/members/${encodeURIComponent(login)}`, { method: 'DELETE' });
 }
 
 // ── Users, roles, audit log ──────────────────────────────────────────

@@ -1,8 +1,11 @@
+import fnmatch
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -74,6 +77,15 @@ class PipelineConfig:
     default_persona: str = ""  # "" -> keyword-based persona selection
     branch_prefix: str = "feat/"
     gate_min_words: int = 5
+    # Governance (new_req.md point 10)
+    require_pr_approval: bool = False
+    protected_paths: tuple[str, ...] = ()
+    # Verification (new_req.md point 11)
+    verify_mode: str = ""  # "" | "command" | "github_actions"
+    test_setup_command: str = ""
+    test_command: str = ""
+    test_timeout_min: int = 10
+    ci_workflow: str = ""
     app_id: str = "default"
     app_name: str = "Default application"
 
@@ -98,6 +110,7 @@ class PipelineConfig:
             prefix += "/"
 
         gate_raw = get("GATE_MIN_WORDS", "5")
+        timeout_raw = get("TEST_TIMEOUT_MIN", "10")
 
         return cls(
             ticket_provider=provider,
@@ -122,6 +135,13 @@ class PipelineConfig:
             default_persona=get("DEFAULT_PERSONA"),
             branch_prefix=prefix,
             gate_min_words=int(gate_raw) if gate_raw.isdigit() else 5,
+            require_pr_approval=get("REQUIRE_PR_APPROVAL").lower() == "true",
+            protected_paths=parse_protected_paths(get("PROTECTED_PATHS")),
+            verify_mode=get("VERIFY_MODE").lower(),
+            test_setup_command=get("TEST_SETUP_COMMAND"),
+            test_command=get("TEST_COMMAND"),
+            test_timeout_min=int(timeout_raw) if timeout_raw.isdigit() and int(timeout_raw) > 0 else 10,
+            ci_workflow=get("CI_WORKFLOW"),
             app_id=app_id,
             app_name=app_name or app_id,
         )
@@ -147,6 +167,8 @@ class PipelineConfig:
     def missing_settings(self) -> list[str]:
         required = dict(_REQUIRED_COMMON)
         required.update(_REQUIRED_ADO if self.ticket_provider == "ado" else _REQUIRED_JIRA)
+        if self.verify_mode == "command":
+            required["TEST_COMMAND"] = "test_command"
         return [key for key, attr in required.items() if not getattr(self, attr)]
 
     def ticket_executor(self):
@@ -166,14 +188,44 @@ class PipelineConfig:
 
 OnStep = Callable[[str, str, Optional[str]], None]
 
+# Called when an app requires sign-off before a PR opens. Receives a summary
+# of the change and blocks until someone decides: returns (approved, actor,
+# note), where approved is None if nobody decided before the timeout.
+WaitForApproval = Callable[[dict], tuple[Optional[bool], str, str]]
+
+
+def parse_protected_paths(raw: str) -> tuple[str, ...]:
+    """Comma- or newline-separated glob patterns -> normalized tuple."""
+    parts = re.split(r"[,\n]", raw or "")
+    return tuple(p.strip().replace("\\", "/") for p in parts if p.strip())
+
+
+def protected_path_violations(files: list[str], patterns: tuple[str, ...]) -> list[str]:
+    """Files matching any protected pattern. Globs follow fnmatch, where `*`
+    also crosses folders (so `ci/*` covers everything under ci/); `**` is
+    accepted as an alias, and a pattern ending in `/` means "this folder".
+    Each file is also tried with a leading `/`, so `*/ci/*` covers a root ci/."""
+    hits = []
+    for f in files:
+        path = f.replace("\\", "/").lstrip("/")
+        for pattern in patterns:
+            pat = pattern.replace("**", "*")
+            if pat.endswith("/"):
+                pat += "*"
+            if fnmatch.fnmatch(path, pat) or fnmatch.fnmatch("/" + path, pat):
+                hits.append(f)
+                break
+    return hits
+
 
 class PipelineHalt(Exception):
     """Raised to stop the pipeline early with a final run status."""
 
-    def __init__(self, status: str, message: str):
+    def __init__(self, status: str, message: str, pr_url: Optional[str] = None):
         super().__init__(message)
         self.status = status
         self.message = message
+        self.pr_url = pr_url  # set when a PR was opened but a later check (CI) failed
 
 
 def _noop_on_step(step: str, state: str, log: Optional[str] = None) -> None:
@@ -260,6 +312,88 @@ def run_cmd(cmd: list[str], cwd: Path | None = None, silent: bool = False) -> tu
     return r.returncode, r.stdout, r.stderr
 
 
+# Anything that looks like a credential is stripped from the environment the
+# repository's own setup/test commands run in — that's code we didn't write.
+_SECRET_ENV_RE = re.compile(r"TOKEN|SECRET|PASSWORD|API_KEY|_PAT$|^ADO_PAT$", re.IGNORECASE)
+
+
+def _safe_env() -> dict:
+    return {k: v for k, v in os.environ.items() if not _SECRET_ENV_RE.search(k)}
+
+
+def run_shell(command: str, cwd: Path, timeout_sec: int) -> tuple[Optional[int], str]:
+    """Run an app's setup/test command. Returns (exit code, combined output);
+    exit code is None if it timed out, in which case the whole process tree
+    is killed (a hung test runner must not outlive the pipeline)."""
+    kwargs: dict = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
+    proc = subprocess.Popen(
+        command, shell=True, cwd=cwd, env=_safe_env(),
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", **kwargs,
+    )
+    try:
+        out, _ = proc.communicate(timeout=timeout_sec)
+        return proc.returncode, out or ""
+    except subprocess.TimeoutExpired:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)
+        out, _ = proc.communicate()
+        return None, out or ""
+
+
+def _tail(text: str, lines: int = 25) -> str:
+    rows = text.rstrip().splitlines()
+    return "\n".join(rows[-lines:])
+
+
+# GitHub Actions polling — module-level so tests can shrink them.
+CI_POLL_SEC = 15
+CI_FIRST_CHECK_GRACE_SEC = 180
+_CI_FAILED_CONCLUSIONS = {"failure", "timed_out", "cancelled", "action_required", "startup_failure", "stale"}
+
+
+def collect_ci_checks(token: str, repo: str, sha: str) -> list[dict]:
+    """Every CI signal on a commit — GitHub Actions check runs plus classic
+    commit statuses — as [{name, state: pending|success|failure, url}]."""
+    checks = []
+    runs = gh_api(token, "GET", f"/repos/{repo}/commits/{sha}/check-runs?per_page=100")
+    for c in runs.get("check_runs", []):
+        if c.get("status") != "completed":
+            state = "pending"
+        else:
+            state = "failure" if c.get("conclusion") in _CI_FAILED_CONCLUSIONS else "success"
+        checks.append({"name": c.get("name", "check"), "state": state, "url": c.get("html_url")})
+    combined = gh_api(token, "GET", f"/repos/{repo}/commits/{sha}/status")
+    for st in combined.get("statuses", []):
+        state = {"success": "success", "pending": "pending"}.get(st.get("state"), "failure")
+        checks.append({"name": st.get("context", "status"), "state": state, "url": st.get("target_url")})
+    return checks
+
+
+def wait_for_ci(token: str, repo: str, sha: str, timeout_sec: int, on_progress: Callable[[str], None]) -> tuple[str, list[dict]]:
+    """Block until the commit's CI settles. Returns (outcome, checks) where
+    outcome is passed | failed | none (no CI ever showed up) | timeout."""
+    start = time.monotonic()
+    last_summary = ""
+    while True:
+        checks = collect_ci_checks(token, repo, sha)
+        elapsed = time.monotonic() - start
+        if checks:
+            counts = {s: sum(c["state"] == s for c in checks) for s in ("pending", "success", "failure")}
+            summary = f"[CI] {counts['success']} passed · {counts['failure']} failed · {counts['pending']} running"
+            if summary != last_summary:
+                on_progress(summary)
+                last_summary = summary
+            if not counts["pending"]:
+                return ("failed" if counts["failure"] else "passed"), checks
+        elif elapsed > CI_FIRST_CHECK_GRACE_SEC:
+            return "none", []
+        if elapsed > timeout_sec:
+            return "timeout", checks
+        time.sleep(CI_POLL_SEC)
+
+
 def gh_api(token: str, method: str, path: str, json_data: dict | None = None) -> dict | list:
     """Call GitHub REST API with the given (per-application) token."""
     url = f"https://api.github.com{path}"
@@ -269,8 +403,13 @@ def gh_api(token: str, method: str, path: str, json_data: dict | None = None) ->
     }
     resp = requests.request(method, url, headers=headers, json=json_data, timeout=30)
     if resp.status_code >= 400:
-        body = resp.json()
-        raise RuntimeError(f"GitHub API {resp.status_code}: {body.get('message', resp.text[:300])}")
+        try:
+            message = resp.json().get("message", resp.text[:300])
+        except ValueError:
+            message = resp.text[:300]
+        raise RuntimeError(f"GitHub API {resp.status_code}: {message}")
+    if resp.status_code == 204 or not resp.content:
+        return {}  # e.g. a workflow_dispatch trigger
     return resp.json()
 
 
@@ -287,6 +426,7 @@ def run_pipeline(
     target_repo: Optional[str] = None,
     target_branch: Optional[str] = None,
     config: Optional[PipelineConfig] = None,
+    wait_for_approval: Optional[WaitForApproval] = None,
 ) -> dict:
     """Runs the 6-stage ticket -> PR pipeline for one ticket (Jira or Azure DevOps,
     per the application's ticket provider).
@@ -296,6 +436,7 @@ def run_pipeline(
     target_repo / target_branch: "owner/repo" and branch to clone + PR against.
     Falls back to the application's TARGET_REPO / TARGET_BRANCH if not given.
     config: the onboarded application's settings for this run; defaults to .env.
+    wait_for_approval: blocks for a human decision when the app requires PR approval.
     Returns {status: "success", ticket_key, pr_url, modified_files} on success.
     Raises PipelineHalt(status, message) on any early stop ("failed" or "human").
     """
@@ -518,6 +659,20 @@ def run_pipeline(
     _, base_commit, _ = run_cmd(["git", "rev-parse", "HEAD"], repo_dir)
     base_commit = base_commit.strip()
 
+    # Point 11: install the repo's dependencies first, so the agent can run
+    # the tests itself while working, and the pipeline can run them after.
+    test_timeout_sec = cfg.test_timeout_min * 60
+    if cfg.verify_mode == "command" and cfg.test_setup_command:
+        on_step("agent", "in-progress", f"[TESTS] Setting up: {cfg.test_setup_command}")
+        rc_setup, setup_out = run_shell(cfg.test_setup_command, repo_dir, test_timeout_sec)
+        if rc_setup != 0:
+            why = "timed out" if rc_setup is None else f"exited with code {rc_setup}"
+            msg = f"Test setup `{cfg.test_setup_command}` {why} — the repository's dependencies couldn't be installed."
+            on_step("agent", "failed", f"[TESTS-OUTPUT]\n{_tail(setup_out)}")
+            on_step("agent", "failed", msg)
+            post_comment(msg, "agent", "failed")
+            raise PipelineHalt("failed", msg)
+
     # Persona skill content, rendered with this run's variables (see
     # skills/README.md for the {{VAR}} contract) — sets the agent's operating
     # persona before it sees the specific ticket.
@@ -548,6 +703,17 @@ def run_pipeline(
         "session. Verify purely by reading the code and running 'git diff'.\n"
         "Just edit the file, verify with 'git diff', then call finish."
     )
+    if cfg.verify_mode == "command":
+        task_prompt += (
+            f"\nTESTS: this repository is tested with `{cfg.test_command}` (dependencies are already installed). "
+            "Run it after your change and fix any failures your change introduces before you finish."
+        )
+    if cfg.protected_paths:
+        task_prompt += (
+            "\nPOLICY: you must NOT create, modify, or delete any file matching these protected paths: "
+            f"{', '.join(cfg.protected_paths)}. If the ticket can't be done without touching them, "
+            "make no change and explain why."
+        )
 
     from openhands.sdk import Agent, Conversation, Tool
     from openhands.tools.terminal import TerminalTool
@@ -622,6 +788,42 @@ def run_pipeline(
 
     print(f"  [OK] Modified files: {modified_files}")
 
+    # Guardrail policy — enforced on what actually changed, not just asked for
+    # in the prompt. Nothing has been committed or pushed at this point.
+    violations = protected_path_violations(modified_files, cfg.protected_paths)
+    if violations:
+        msg = (
+            f"Guardrail blocked this change — the agent modified protected path(s): {', '.join(violations)} "
+            f"(policy for {cfg.app_name}: {', '.join(cfg.protected_paths)}). Nothing was pushed."
+        )
+        print(f"  !! {msg}")
+        on_step("agent", "human", f"[GUARDRAIL] {msg}")
+        post_comment(msg, "agent", "human")
+        set_ticket_status(cfg.status_failed, "agent", "human")
+        raise PipelineHalt("human", msg)
+
+    # Point 11: the app's own test command is the real gate — the agent
+    # saying "done" isn't enough.
+    verification = "No automated tests are configured for this application — review the diff."
+    if cfg.verify_mode == "command":
+        on_step("agent", "in-progress", f"[TESTS] Running {cfg.test_command}")
+        t0 = time.monotonic()
+        rc_tests, test_out = run_shell(cfg.test_command, repo_dir, test_timeout_sec)
+        took = f"{time.monotonic() - t0:.0f}s"
+        if rc_tests != 0:
+            why = f"timed out after {cfg.test_timeout_min} min" if rc_tests is None else f"failed (exit code {rc_tests})"
+            msg = f"Tests {why}: `{cfg.test_command}`. Nothing was pushed."
+            print(f"  !! {msg}")
+            on_step("agent", "human", f"[TESTS-OUTPUT]\n{_tail(test_out)}")
+            on_step("agent", "human", f"[TESTS] ✗ {msg}")
+            post_comment(f"{msg}\n\nLast lines of output:\n{_tail(test_out, 15)}", "agent", "human")
+            set_ticket_status(cfg.status_failed, "agent", "human")
+            raise PipelineHalt("human", msg)
+        on_step("agent", "in-progress", f"[TESTS] ✓ {cfg.test_command} passed ({took})")
+        verification = f"`{cfg.test_command}` passed ({took})."
+    elif cfg.verify_mode == "github_actions":
+        verification = "GitHub Actions results are reported on this PR."
+
     # Validate requirements.txt — only check the new packages the ticket asked for,
     # not the entire file (pre-existing packages like nvidia-cufile may not resolve locally).
     new_packages = [l.strip() for l in description.split("\n") if ">=" in l or "==" in l]
@@ -644,6 +846,30 @@ def run_pipeline(
 
     print("  [OK] Work verified successfully")
     on_step("agent", "success", f"Modified: {', '.join(modified_files)}")
+
+    # ── APPROVAL GATE (per app) ────────────────────────────────────
+    if cfg.require_pr_approval:
+        run_cmd(["git", "add", "-A", "--intent-to-add"], repo_dir, silent=True)  # show new files in the stat
+        _, diffstat, _ = run_cmd(["git", "diff", "--stat", base_commit], repo_dir, silent=True)
+        summary_line = diffstat.strip().splitlines()[-1] if diffstat.strip() else f"{len(modified_files)} file(s) changed"
+        on_step("pr", "human", f"[APPROVAL] Waiting for approval before opening a PR — {summary_line}: {', '.join(modified_files)}")
+        if wait_for_approval is None:
+            msg = f"{cfg.app_name} requires approval before a PR opens, and this run has no approver (CLI run)."
+            on_step("pr", "human", msg)
+            raise PipelineHalt("human", msg)
+        approved, actor, note = wait_for_approval({"modified_files": modified_files, "diffstat": diffstat})
+        if not approved:
+            if approved is None:
+                msg = "Approval request timed out — no one approved the change, so no PR was opened."
+            else:
+                msg = f"PR rejected by @{actor}" + (f": {note}" if note else "") + " — no PR was opened."
+            print(f"  !! {msg}")
+            on_step("pr", "human", msg)
+            post_comment(msg, "pr", "human")
+            set_ticket_status(cfg.status_failed, "pr", "human")
+            raise PipelineHalt("human", msg)
+        on_step("pr", "in-progress", f"Approved by @{actor}" + (f": {note}" if note else ""))
+        print(f"  [OK] Approved by @{actor}")
 
     # ── STEP 5: PR CREATION ─────────────────────────────────────────
     on_step("pr", "in-progress")
@@ -708,7 +934,7 @@ def run_pipeline(
         f"**Changes**:\n"
         f"- Modified files: {', '.join(modified_files)}\n\n"
         f"**Verification**:\n"
-        f"- Tests passing: [OK]\n"
+        f"- {verification}\n"
         f"- Ready for human review.\n"
     )
 
@@ -720,6 +946,37 @@ def run_pipeline(
     })
     pr_url = pr_data.get("html_url", "")
     print(f"  [OK] PR created: {pr_url}")
+
+    if cfg.verify_mode == "github_actions":
+        on_step("pr", "in-progress", pr_url)
+        _, head_sha, _ = run_cmd(["git", "rev-parse", "HEAD"], repo_dir, silent=True)
+        head_sha = head_sha.strip()
+        if cfg.ci_workflow:
+            try:
+                gh_api(cfg.github_token, "POST", f"/repos/{target_repo}/actions/workflows/{cfg.ci_workflow}/dispatches", {"ref": branch_name})
+                on_step("pr", "in-progress", f"[CI] Triggered workflow {cfg.ci_workflow} on {branch_name}")
+            except RuntimeError as e:
+                on_step("pr", "in-progress", f"[CI] Couldn't trigger {cfg.ci_workflow} ({e}) — waiting for push/PR checks instead")
+        on_step("pr", "in-progress", f"[CI] Waiting for GitHub Actions on {head_sha[:7]}…")
+        outcome, checks = wait_for_ci(
+            cfg.github_token, target_repo, head_sha, test_timeout_sec,
+            lambda line: on_step("pr", "in-progress", line),
+        )
+        if outcome != "passed":
+            failed = [c["name"] for c in checks if c["state"] == "failure"]
+            msg = {
+                "failed": f"CI failed on the PR: {', '.join(failed)}",
+                "none": "No CI checks ran for this PR — check the repository's GitHub Actions triggers",
+                "timeout": f"CI didn't finish within {cfg.test_timeout_min} min",
+            }[outcome]
+            print(f"  !! {msg}")
+            on_step("pr", "human", f"[CI] ✗ {msg}")
+            post_comment(f"{msg}.\n\n**Pull Request**: {pr_url}", "pr", "human")
+            set_ticket_status(cfg.status_failed, "pr", "human")
+            raise PipelineHalt("human", msg, pr_url=pr_url)
+        verification = f"GitHub Actions passed ({len(checks)} check{'s' if len(checks) != 1 else ''})."
+        on_step("pr", "in-progress", f"[CI] ✓ {verification}")
+
     on_step("pr", "success", pr_url)
 
     # ── STEP 6: REPORT BACK ───────────────────────────────────────
@@ -730,7 +987,7 @@ def run_pipeline(
         f"Agent completed work on this ticket.\n\n"
         f"**Pull Request**: {pr_url}\n\n"
         f"**Files modified**: {', '.join(modified_files)}\n"
-        f"Tests verified: [OK]"
+        f"**Verification**: {verification}"
     )
 
     on_step("jira", "success", f"{resolved_key} -> {cfg.status_done}")

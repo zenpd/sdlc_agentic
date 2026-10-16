@@ -5,7 +5,7 @@ import Nav from '@/components/Nav';
 import PageHeader from '@/components/PageHeader';
 import { useActiveApp } from '@/components/AppContext';
 import {
-  getConfig, updateConfig, getAppConfig, updateAppConfig, listSkills,
+  getConfig, updateConfig, getAppConfig, updateAppConfig, listSkills, updateApp,
   type ConfigUpdate, type AppConfigUpdate, type SkillSummary,
 } from '@/lib/api';
 
@@ -71,11 +71,14 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 const SETTING_KEYS = [
-  'JIRA_BASE_URL', 'JIRA_USER_EMAIL', 'JIRA_JQL', 'ADO_ORG_URL', 'ADO_PROJECT', 'ADO_ASSIGNEE', 'ADO_WIQL',
+  'JIRA_BASE_URL', 'JIRA_USER_EMAIL', 'ADO_ORG_URL', 'ADO_PROJECT',
   'TARGET_REPO', 'TARGET_BRANCH', 'AZURE_OPENAI_ENDPOINT', 'AZURE_OPENAI_DEPLOYMENT',
   'STATUS_DONE', 'STATUS_IN_PROGRESS', 'STATUS_FAILED',
 ] as const;
-const APP_DEFAULT_KEYS = ['DEFAULT_PERSONA', 'BRANCH_PREFIX', 'GATE_MIN_WORDS'] as const;
+const APP_DEFAULT_KEYS = [
+  'DEFAULT_PERSONA', 'BRANCH_PREFIX', 'GATE_MIN_WORDS', 'REQUIRE_PR_APPROVAL', 'PROTECTED_PATHS',
+  'VERIFY_MODE', 'TEST_SETUP_COMMAND', 'TEST_COMMAND', 'TEST_TIMEOUT_MIN', 'CI_WORKFLOW',
+] as const;
 const SECRET_KEYS = ['JIRA_API_TOKEN', 'ADO_PAT', 'GITHUB_TOKEN', 'AZURE_OPENAI_API_KEY'] as const;
 
 const EMPTY_SECRETS: Record<string, string> = Object.fromEntries(SECRET_KEYS.map((k) => [k, '']));
@@ -84,7 +87,7 @@ const NO_SECRETS: Record<string, SecretState> = Object.fromEntries(SECRET_KEYS.m
 type Scope = 'app' | 'server';
 
 export default function ConfigPage() {
-  const { activeApp, activeAppId, refreshApps, me, can } = useActiveApp();
+  const { activeApp, activeAppId, refreshApps, refreshTeams, teams, me, can } = useActiveApp();
   const canEdit = can('maintainer');
   const [scope, setScope] = useState<Scope>('app');
   const [loading, setLoading] = useState(true);
@@ -234,15 +237,12 @@ export default function ConfigPage() {
                   <Field label="Jira Base URL" value={fields.JIRA_BASE_URL || ''} onChange={setField('JIRA_BASE_URL')} inherited={inh('JIRA_BASE_URL')} placeholder="https://your-domain.atlassian.net" />
                   <Field label="Jira User Email" value={fields.JIRA_USER_EMAIL || ''} onChange={setField('JIRA_USER_EMAIL')} inherited={inh('JIRA_USER_EMAIL')} placeholder="you@company.com" />
                   <SecretField label="Jira API Token" state={secretState.JIRA_API_TOKEN} value={secrets.JIRA_API_TOKEN} onChange={setSecret('JIRA_API_TOKEN')} />
-                  <Field label="Jira JQL (optional override)" value={fields.JIRA_JQL || ''} onChange={setField('JIRA_JQL')} inherited={inh('JIRA_JQL')} placeholder='labels = "Agent-ready" AND status = "Ready for Agent"' />
                 </>
               ) : (
                 <>
                   <Field label="ADO Org URL" value={fields.ADO_ORG_URL || ''} onChange={setField('ADO_ORG_URL')} inherited={inh('ADO_ORG_URL')} placeholder="https://dev.azure.com/your-org" />
                   <Field label="ADO Project" value={fields.ADO_PROJECT || ''} onChange={setField('ADO_PROJECT')} inherited={inh('ADO_PROJECT')} placeholder="Your-Project" />
                   <SecretField label="ADO Personal Access Token" state={secretState.ADO_PAT} value={secrets.ADO_PAT} onChange={setSecret('ADO_PAT')} />
-                  <Field label="ADO Assignee (optional)" value={fields.ADO_ASSIGNEE || ''} onChange={setField('ADO_ASSIGNEE')} inherited={inh('ADO_ASSIGNEE')} placeholder="you@company.com" />
-                  <Field label="ADO WIQL (optional override)" value={fields.ADO_WIQL || ''} onChange={setField('ADO_WIQL')} inherited={inh('ADO_WIQL')} placeholder="Default: tag 'Agent-ready', state 'New'" />
                 </>
               )}
             </Section>
@@ -277,6 +277,90 @@ export default function ConfigPage() {
                 </div>
                 <Field label="Branch prefix" value={fields.BRANCH_PREFIX || ''} onChange={setField('BRANCH_PREFIX')} placeholder="feat/" />
                 <Field label="Clarity gate — min. words" value={fields.GATE_MIN_WORDS || ''} onChange={setField('GATE_MIN_WORDS')} placeholder="5" />
+              </Section>
+            )}
+
+            {scope === 'app' && (
+              <Section title="Verification — tests & CI">
+                <div>
+                  <label className="label-main">How to verify the agent&apos;s change</label>
+                  <select className="input-main" value={fields.VERIFY_MODE || ''} onChange={(e) => setField('VERIFY_MODE')(e.target.value)}>
+                    <option value="">Review the diff only (no automated tests)</option>
+                    <option value="command">Run a test command before the PR</option>
+                    <option value="github_actions">Wait for GitHub Actions on the PR</option>
+                  </select>
+                  <div className="field-hint">
+                    {fields.VERIFY_MODE === 'command' ? 'Failing tests stop the run — nothing is pushed'
+                      : fields.VERIFY_MODE === 'github_actions' ? 'A failing check hands the ticket back, with the PR link'
+                      : 'The PR says honestly that nothing was tested'}
+                  </div>
+                </div>
+                {fields.VERIFY_MODE === 'command' && (
+                  <>
+                    <Field label="Setup command (optional)" value={fields.TEST_SETUP_COMMAND || ''} onChange={setField('TEST_SETUP_COMMAND')} placeholder="pip install -r requirements.txt" />
+                    <Field label="Test command" value={fields.TEST_COMMAND || ''} onChange={setField('TEST_COMMAND')} placeholder="pytest -q   ·   npm test" />
+                  </>
+                )}
+                {fields.VERIFY_MODE === 'github_actions' && (
+                  <Field label="Workflow to trigger (optional)" value={fields.CI_WORKFLOW || ''} onChange={setField('CI_WORKFLOW')} placeholder="ci.yml — blank = wait for push/PR checks" />
+                )}
+                {fields.VERIFY_MODE && (
+                  <Field label="Timeout (minutes)" value={fields.TEST_TIMEOUT_MIN || ''} onChange={setField('TEST_TIMEOUT_MIN')} placeholder="10" />
+                )}
+              </Section>
+            )}
+
+            {scope === 'app' && activeApp && (
+              <Section title="Ownership">
+                <div>
+                  <label className="label-main">Team</label>
+                  <select
+                    className="input-main"
+                    value={activeApp.team_id ?? ''}
+                    disabled={!can('admin') || activeApp.is_default}
+                    onChange={async (e) => {
+                      try {
+                        await updateApp(activeAppId, { team_id: e.target.value || null });
+                        await Promise.all([refreshApps(), refreshTeams()]);
+                        setSaved(true);
+                      } catch (err: any) { setError(err.message); }
+                    }}
+                  >
+                    <option value="">Shared — everyone can use it</option>
+                    {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                  </select>
+                  <div className="field-hint">
+                    {activeApp.is_default ? 'The default application is always shared'
+                      : can('admin') ? 'Only this team (and admins) can see and run it — saved immediately'
+                      : 'Only admins can move an application to another team'}
+                  </div>
+                </div>
+              </Section>
+            )}
+
+            {scope === 'app' && (
+              <Section title="Governance">
+                <div>
+                  <label className="label-main">Approval before pull request</label>
+                  <select className="input-main" value={fields.REQUIRE_PR_APPROVAL || ''} onChange={(e) => setField('REQUIRE_PR_APPROVAL')(e.target.value)}>
+                    <option value="">Not required (default)</option>
+                    <option value="true">Required — a maintainer must approve</option>
+                    <option value="false">Not required</option>
+                  </select>
+                  <div className="field-hint">When required, runs pause after the agent finishes until someone approves</div>
+                </div>
+                <div style={{ gridColumn: 'span 2' }}>
+                  <label className="label-main">Protected paths (agent may never change these)</label>
+                  <textarea
+                    className="input-main"
+                    rows={3}
+                    value={fields.PROTECTED_PATHS || ''}
+                    onChange={(e) => setField('PROTECTED_PATHS')(e.target.value)}
+                    placeholder={['.github/workflows/*', 'ci/*', '*.tf'].join('\n')}
+                    style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5, resize: 'vertical' }}
+                  />
+                  <div className="field-hint">One pattern per line or comma-separated. A run that touches one is stopped before anything is pushed.</div>
+                </div>
               </Section>
             )}
           </>
