@@ -111,7 +111,7 @@ const SETTING_KEYS = [
   'NOTIFY_EMAIL_TO', 'SMTP_HOST', 'SMTP_PORT', 'SMTP_FROM', 'SMTP_USERNAME', 'SMTP_STARTTLS',
 ] as const;
 const APP_DEFAULT_KEYS = [
-  'DEFAULT_PERSONA', 'BRANCH_PREFIX', 'GATE_MIN_WORDS', 'REQUIRE_PR_APPROVAL', 'PROTECTED_PATHS',
+  'DEFAULT_PERSONA', 'BRANCH_PREFIX', 'GATE_MIN_WORDS', 'AGENT_TIMEOUT_MIN', 'REQUIRE_PR_APPROVAL', 'PROTECTED_PATHS',
   'VERIFY_MODE', 'TEST_SETUP_COMMAND', 'TEST_COMMAND', 'TEST_TIMEOUT_MIN', 'CI_WORKFLOW',
 ] as const;
 const SECRET_KEYS = [
@@ -433,6 +433,10 @@ export default function ConfigPage() {
                 </div>
                 <Field label="Branch prefix" value={fields.BRANCH_PREFIX || ''} onChange={setField('BRANCH_PREFIX')} placeholder="feat/" />
                 <Field label="Clarity gate — min. words" value={fields.GATE_MIN_WORDS || ''} onChange={setField('GATE_MIN_WORDS')} placeholder="5" />
+                <div>
+                  <Field label="Agent time limit (minutes)" value={fields.AGENT_TIMEOUT_MIN || ''} onChange={setField('AGENT_TIMEOUT_MIN')} placeholder="5" />
+                  <div className="field-hint">If the agent hasn&apos;t finished by then it&apos;s stopped and the ticket goes back to a person — nothing is pushed</div>
+                </div>
               </Section>
             )}
 
@@ -455,13 +459,8 @@ export default function ConfigPage() {
                 {fields.VERIFY_MODE === 'command' && (
                   <>
                     <div>
-                      <Field label="Setup command (optional)" value={fields.TEST_SETUP_COMMAND || ''} onChange={setField('TEST_SETUP_COMMAND')} placeholder={suggestions?.setup_command || 'pip install -r requirements.txt'} />
-                      {suggestions?.setup_command && !fields.TEST_SETUP_COMMAND && (
-                        <div className="field-hint" title="Not filled in automatically — it installs packages on the pipeline server">
-                          <button type="button" className="link-btn" onClick={() => setField('TEST_SETUP_COMMAND')(suggestions.setup_command)}>Use</button>{' '}
-                          <code>{suggestions.setup_command}</code>
-                        </div>
-                      )}
+                      <Field label="Setup command (optional)" value={fields.TEST_SETUP_COMMAND || ''} onChange={setField('TEST_SETUP_COMMAND')} placeholder="Usually leave blank" />
+                      <div className="field-hint">Runs on the pipeline server before the agent starts — only set it if the tests can&apos;t run without it</div>
                     </div>
                     <Field label="Test command" value={fields.TEST_COMMAND || ''} onChange={setField('TEST_COMMAND')} placeholder="pytest -q   ·   npm test" />
                   </>

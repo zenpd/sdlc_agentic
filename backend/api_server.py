@@ -28,7 +28,7 @@ from backend import (
     users_store,
 )
 from backend.ado_tool import DEFAULT_WIQL, ado_ticket_matches_wiql
-from backend.jira_bot import PipelineConfig, PipelineHalt, run_pipeline
+from backend.jira_bot import PipelineConfig, PipelineHalt, redact, run_pipeline
 from backend.jira_tool import jira_ticket_matches_jql
 
 
@@ -49,6 +49,11 @@ ADO_WEBHOOK_USERNAME = "sdlc-agentic"
 # How long a run waits for someone to approve its PR before giving up.
 APPROVAL_TIMEOUT_SEC = int(os.getenv("APPROVAL_TIMEOUT_HOURS", "24")) * 3600
 _APPROVAL_POLL_SEC = 2
+# Every run shares one Azure OpenAI per-minute token quota. Two agents at once
+# ran it dry on 16 Oct (429s slowed both runs), so runs queue for a slot.
+# A run waiting for a human approval gives its slot up while it waits.
+MAX_PARALLEL_RUNS = max(1, int(os.getenv("MAX_PARALLEL_RUNS", "1") or 1))
+_run_slots = threading.BoundedSemaphore(MAX_PARALLEL_RUNS)
 
 app = FastAPI(title="Jira SDLC Pipeline API")
 
@@ -219,6 +224,8 @@ def _execute(
             )
 
     def finish(status: str, pr_url: str | None, message: str | None) -> None:
+        # Final messages go to events and outbound notifications — never with a credential in them.
+        message = redact(message, config.github_token, config.ado_pat, config.jira_api_token, config.azure_key)
         runs_db.finish_run(run_id, status, pr_url, int(time.monotonic() - start))
         run_events.record(
             run_id,
@@ -251,22 +258,43 @@ def _execute(
                     },
                 )
 
+    slot = {"held": False}
+
+    def take_slot(step_key: str) -> None:
+        if not _run_slots.acquire(blocking=False):
+            on_step(step_key, "in-progress", "Queued — waiting for the run ahead of this one to finish")
+            waited = time.monotonic()
+            _run_slots.acquire()
+            on_step(step_key, "in-progress", f"Started after {int(time.monotonic() - waited)}s in the queue")
+        slot["held"] = True
+
+    def give_up_slot() -> None:
+        if slot["held"]:
+            slot["held"] = False
+            _run_slots.release()
+
     def wait_for_approval(_summary: dict):
         """Park this run as awaiting-approval and block until a maintainer
-        decides via POST /api/runs/{id}/approval (or the timeout passes)."""
+        decides via POST /api/runs/{id}/approval (or the timeout passes).
+        The run's slot is free while it waits, so other runs aren't held up."""
         runs_db.request_approval(run_id)
-        deadline = time.monotonic() + APPROVAL_TIMEOUT_SEC
-        while time.monotonic() < deadline:
-            approval = (runs_db.get_run(run_id) or {}).get("approval") or {}
-            if approval.get("status") in ("approved", "rejected"):
-                runs_db.set_status(run_id, "in-progress")
-                return approval["status"] == "approved", approval.get("by") or "", approval.get("note") or ""
-            time.sleep(_APPROVAL_POLL_SEC)
-        runs_db.decide_approval(run_id, "expired", "system")
-        runs_db.set_status(run_id, "in-progress")
-        return None, "", ""
+        give_up_slot()
+        try:
+            deadline = time.monotonic() + APPROVAL_TIMEOUT_SEC
+            while time.monotonic() < deadline:
+                approval = (runs_db.get_run(run_id) or {}).get("approval") or {}
+                if approval.get("status") in ("approved", "rejected"):
+                    runs_db.set_status(run_id, "in-progress")
+                    return approval["status"] == "approved", approval.get("by") or "", approval.get("note") or ""
+                time.sleep(_APPROVAL_POLL_SEC)
+            runs_db.decide_approval(run_id, "expired", "system")
+            runs_db.set_status(run_id, "in-progress")
+            return None, "", ""
+        finally:
+            take_slot("pr")
 
     try:
+        take_slot("fetch")
         result = run_pipeline(
             ticket_key=ticket_key,
             on_step=on_step,
@@ -286,6 +314,8 @@ def _execute(
             extra={"run_id": run_id, "ticket_key": ticket_key, "app_id": config.app_id},
         )
         finish("error", None, f"{type(e).__name__}: {str(e)[:300]}")
+    finally:
+        give_up_slot()
 
 
 @app.post("/api/run-ticket")

@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from collections.abc import Mapping
@@ -80,6 +81,7 @@ class PipelineConfig:
     default_persona: str = ""  # "" -> keyword-based persona selection
     branch_prefix: str = "feat/"
     gate_min_words: int = 5
+    agent_timeout_min: int = 5
     # Governance (new_req.md point 10)
     require_pr_approval: bool = False
     protected_paths: tuple[str, ...] = ()
@@ -114,6 +116,7 @@ class PipelineConfig:
 
         gate_raw = get("GATE_MIN_WORDS", "5")
         timeout_raw = get("TEST_TIMEOUT_MIN", "10")
+        agent_timeout_raw = get("AGENT_TIMEOUT_MIN", "5")
 
         return cls(
             ticket_provider=provider,
@@ -138,6 +141,7 @@ class PipelineConfig:
             default_persona=get("DEFAULT_PERSONA"),
             branch_prefix=prefix,
             gate_min_words=int(gate_raw) if gate_raw.isdigit() else 5,
+            agent_timeout_min=int(agent_timeout_raw) if agent_timeout_raw.isdigit() and int(agent_timeout_raw) > 0 else 5,
             require_pr_approval=get("REQUIRE_PR_APPROVAL").lower() == "true",
             protected_paths=parse_protected_paths(get("PROTECTED_PATHS")),
             verify_mode=get("VERIFY_MODE").lower(),
@@ -348,6 +352,13 @@ def _normalize_reported_eof_blank_lines(
     return normalized_paths
 
 
+VERDICT_REMINDER = (
+    "Your reply is missing the required verdict. Reply again: the first line must be exactly "
+    "`VERDICT: PASS` or `VERDICT: FAIL` (no other text or formatting on that line), "
+    "followed by your review summary."
+)
+
+
 def _run_verification_agent(
     llm,
     repo_dir: Path,
@@ -371,7 +382,16 @@ def _run_verification_agent(
     try:
         conversation.send_message(prompt)
         conversation.run()
-        return get_agent_final_response(conversation.state.active_branch())
+        response = get_agent_final_response(conversation.state.active_branch())
+        if _verification_verdict(response) is None:
+            # A good review that forgot its verdict line would otherwise stop
+            # the run. Ask once, in the same conversation, for just the format —
+            # still fail-closed if the reviewer can't give a clear verdict.
+            on_step("verify", "in-progress", "Reviewer gave no explicit verdict — asking it once more")
+            conversation.send_message(VERDICT_REMINDER)
+            conversation.run()
+            response = get_agent_final_response(conversation.state.active_branch())
+        return response
     finally:
         if on_usage is not None:
             _report_usage(
@@ -560,9 +580,62 @@ def run_shell(command: str, cwd: Path, timeout_sec: int) -> tuple[Optional[int],
         return None, out or ""
 
 
+# Hard cap on coding-agent steps (one LLM call each); a normal ticket uses 10-40.
+AGENT_MAX_STEPS = 60
+
+# pytest's exit code for "collected no tests" (pytest.ExitCode.NO_TESTS_COLLECTED).
+PYTEST_NO_TESTS_EXIT = 5
+
+
+# Files that tell the gate nothing about what the code does.
+_NOISE_EXT = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".pdf", ".zip", ".lock",
+              ".woff", ".woff2", ".ttf", ".mp4", ".mp3", ".min.js", ".map")
+REPO_FILES_FOR_GATE = 200
+
+
+def summarize_repo_files(paths: list[str], limit: int = REPO_FILES_FOR_GATE) -> str:
+    """Repository file list for the clarity gate, bounded so a huge repo
+    can't blow up the prompt: code/config files first, then a count."""
+    useful = [p for p in paths if not p.lower().endswith(_NOISE_EXT) and "node_modules/" not in p]
+    shown = useful[:limit]
+    more = len(useful) - len(shown)
+    return "\n".join(shown) + (f"\n… and {more} more files" if more > 0 else "")
+
+
 def _tail(text: str, lines: int = 25) -> str:
     rows = text.rstrip().splitlines()
     return "\n".join(rows[-lines:])
+
+
+# git echoes the remote URL in its errors, and ours carries the token
+# (https://<token>@github.com/...). Nothing with a credential in it may reach
+# run logs, ticket comments or the UI.
+_URL_CREDENTIALS_RE = re.compile(r"(https?://)[^/\s@]+@")
+_TOKEN_RE = re.compile(r"\b(?:gh[oprsu]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
+
+
+def redact(text: Optional[str], *secrets: str) -> Optional[str]:
+    if not text:
+        return text
+    text = _URL_CREDENTIALS_RE.sub(r"\1***@", text)
+    text = _TOKEN_RE.sub("***", text)
+    for secret in secrets:
+        if secret and len(secret) >= 8:
+            text = text.replace(secret, "***")
+    return text
+
+
+_GIT_AUTH_FAILURE = ("could not read password", "authentication failed", "invalid username or password",
+                     "terminal prompts disabled", "returned error: 401", "returned error: 403")
+
+
+def git_failure_message(action: str, err: str, app_name: str, *secrets: str) -> str:
+    """A git clone/push error, credential-free, in words a person can act on."""
+    if any(marker in err.lower() for marker in _GIT_AUTH_FAILURE):
+        return (f"{action} failed: GitHub rejected the token saved for {app_name} — it has expired or been revoked "
+                f"(a GitHub sign-in can retire older tokens). Re-select the repository on the Applications page "
+                f"to save a fresh token, then run the ticket again.")
+    return f"{action} failed: {redact(err.strip()[:300], *secrets)}"
 
 
 # GitHub Actions polling — module-level so tests can shrink them.
@@ -682,9 +755,14 @@ def run_pipeline(
         except ValueError as e:
             raise PipelineHalt("failed", str(e))
     cfg = config
+    secrets = (cfg.github_token, cfg.ado_pat, cfg.jira_api_token, cfg.azure_key)
+    report_step, report_log = on_step, on_log
+
+    def on_step(step: str, state: str, log: Optional[str] = None) -> None:
+        report_step(step, state, redact(log, *secrets))
 
     def log_event(stage: str, message: str, level: str = "info") -> None:
-        on_log(stage, level, message)
+        report_log(stage, level, redact(message, *secrets))
 
     def report_usage(stage: str, metrics: Metrics) -> None:
         _report_usage(on_usage, stage, metrics)
@@ -729,7 +807,7 @@ def run_pipeline(
         network error, etc.) is pushed into that step's own log
         instead of being silently discarded — a swallowed failure here used to
         look identical to "worked fine" from the ticket's side."""
-        obs = ticket(TicketAction(command="add_comment", ticket_key=resolved_key, comment_text=text))
+        obs = ticket(TicketAction(command="add_comment", ticket_key=resolved_key, comment_text=redact(text, *secrets)))
         if obs.is_error:
             on_step(step_key, state, f"[WARN] Comment not posted to ticket: {obs.text[:200]}")
 
@@ -847,6 +925,24 @@ def run_pipeline(
         set_ticket_status(cfg.status_failed, "gate", "human")
         raise PipelineHalt("human", msg)
 
+    # Clone first: the gate checks the ticket against what's actually in the
+    # repository, so a ticket meant for another codebase is caught here in
+    # seconds instead of after the agent has searched for it for minutes.
+    on_step("gate", "in-progress", f"Cloning {target_repo} ({target_branch}) to check the ticket against it")
+    repo_url = f"https://{cfg.github_token}@github.com/{target_repo}.git"
+    rc, out, err = run_cmd(
+        ["git", "clone", "--branch", target_branch, repo_url, str(repo_dir)],
+        cwd=workspace_dir,
+        silent=True,
+    )
+    if rc != 0:
+        msg = git_failure_message(f"Cloning {target_repo}", err, cfg.app_name, *secrets)
+        on_step("gate", "failed", msg)
+        post_comment(msg, "gate", "failed")
+        raise PipelineHalt("failed", msg)
+    _, tracked, _ = run_cmd(["git", "ls-files"], repo_dir, silent=True)
+    repo_files = summarize_repo_files([line.strip() for line in tracked.splitlines() if line.strip()])
+
     from pydantic import SecretStr
 
     from openhands.sdk import LLM
@@ -858,14 +954,23 @@ def run_pipeline(
         base_url=cfg.azure_url,
     )
 
+    repo_check = (
+        f"Files in {target_repo}:\n{repo_files}\n\n"
+        "Second, does this ticket belong to THIS repository? Answer NO if it clearly concerns a "
+        "different codebase: it names features, endpoints, modules or a business domain that have "
+        "nothing to do with these files. A ticket that asks to ADD something new that fits this "
+        "codebase is fine.\n"
+        "If you answer NO for that reason, start your reason with 'Wrong repository:'.\n\n"
+    ) if repo_files else ""
     gate_prompt = (
         "You are validating a ticket for an automation bot. "
         f"The bot will work in repo {target_repo} on branch '{target_branch}'.\n\n"
-        "Does the following description have enough detail about WHAT to change "
+        "First, does the following description have enough detail about WHAT to change "
         "(specific packages, versions, files) to implement without guessing?\n"
         "Ignore missing repo/branch/location details — those are handled by the bot configuration.\n\n"
         f"Summary: {summary}\nDescription: {description}\n\n"
-        "Answer YES or NO followed by a one-sentence reason."
+        f"{repo_check}"
+        "Answer YES only if both checks pass, otherwise NO, followed by a one-sentence reason."
     )
 
     try:
@@ -888,27 +993,19 @@ def run_pipeline(
     gate_ok = gate_text.strip().upper().startswith("YES")
 
     if not gate_ok:
-        on_step("gate", "human", gate_text.strip()[:200])
-        post_comment(f"Ticket needs more detail: {gate_text.strip()}", "gate", "human")
+        on_step("gate", "human", gate_text.strip()[:300])
+        if "wrong repository" in gate_text.lower():
+            post_comment(f"This ticket doesn't look like it belongs to {target_repo} — check the application "
+                         f"it was run for. {gate_text.strip()}", "gate", "human")
+        else:
+            post_comment(f"Ticket needs more detail: {gate_text.strip()}", "gate", "human")
         set_ticket_status(cfg.status_failed, "gate", "human")
         raise PipelineHalt("human", gate_text.strip())
 
     on_step("gate", "success", gate_text.strip()[:200])
 
     # ── STEP 3: AGENT RUN ─────────────────────────────────────────
-    on_step("agent", "in-progress", "Cloning repository and starting coding agent")
-
-    repo_url = f"https://{cfg.github_token}@github.com/{target_repo}.git"
-    rc, out, err = run_cmd(
-        ["git", "clone", "--branch", target_branch, repo_url, str(repo_dir)],
-        cwd=workspace_dir,
-        silent=True,
-    )
-    if rc != 0:
-        msg = f"Failed to clone repo: {err[:300]}"
-        on_step("agent", "failed", msg)
-        post_comment(msg, "agent", "failed")
-        raise PipelineHalt("failed", msg)
+    on_step("agent", "in-progress", "Starting coding agent")
 
     # Snapshot HEAD so the verify step can detect changes the agent commits
     # itself, not just changes left uncommitted in the working tree.
@@ -983,6 +1080,12 @@ def run_pipeline(
         "process to manually test your change (e.g. 'npm run dev', 'python -m http.server') — there is "
         "no browser here to view it with, and interrupting a blocking command can crash your terminal "
         "session. Verify purely by reading the code and running 'git diff'.\n"
+        f"IMPORTANT: The file editor only accepts ABSOLUTE paths. Always use paths that start with {repo_dir} "
+        f"(e.g. {repo_dir / 'src' / 'app.py'}), never relative ones like 'src/app.py'.\n"
+        "Read a file in one go (view it without a line range) unless it is longer than about 500 lines — "
+        "don't page through it a few lines at a time.\n"
+        f"You have {cfg.agent_timeout_min} minutes. Find the relevant files quickly (e.g. 'git grep'). If the "
+        "ticket doesn't match this repository's code, stop and say so instead of searching further.\n"
         "Just edit the file, verify with 'git diff', then call finish."
     )
     if cfg.verify_mode == "command":
@@ -1021,12 +1124,26 @@ def run_pipeline(
         agent=agent,
         workspace=str(repo_dir),
         callbacks=[_make_agent_event_logger(on_step)],
+        max_iteration_per_run=AGENT_MAX_STEPS,
     )
 
     os.environ["GIT_TERMINAL_PROMPT"] = "0"
 
+    # A normal ticket takes the agent a few minutes. One that's too big,
+    # unclear, or meant for another repository can otherwise wander for half
+    # an hour and burn a dollar of tokens — so it gets a hard time limit.
+    # pause() stops it before its next step (after the current LLM call).
+    timed_out = threading.Event()
+
+    def _stop_agent() -> None:
+        timed_out.set()
+        conversation.pause()
+
+    timer = threading.Timer(cfg.agent_timeout_min * 60, _stop_agent)
+    timer.daemon = True
     try:
         conversation.send_message(task_prompt)
+        timer.start()
         conversation.run()
     except Exception as e:
         msg = f"Agent run failed: {str(e)[:300]}"
@@ -1035,10 +1152,24 @@ def run_pipeline(
         set_ticket_status(cfg.status_failed, "agent", "human")
         raise PipelineHalt("human", msg)
     finally:
+        timer.cancel()
         report_usage(
             "agent",
             conversation.conversation_stats.get_combined_metrics(),
         )
+
+    status = getattr(getattr(getattr(conversation, "state", None), "execution_status", None), "value", "")
+    if timed_out.is_set() or status in ("error", "stuck"):
+        why = (f"ran out of time ({cfg.agent_timeout_min} min limit for {cfg.app_name})" if timed_out.is_set()
+               else f"hit its step limit ({AGENT_MAX_STEPS} steps)" if status == "error"
+               else "got stuck repeating itself")
+        msg = (f"The agent {why} without finishing. The ticket may be too large, unclear, "
+               f"or meant for a different repository than {target_repo}. Nothing was pushed.")
+        log_event("agent", msg, "warning")
+        on_step("agent", "human", f"[LIMIT] {msg}")
+        post_comment(msg, "agent", "human")
+        set_ticket_status(cfg.status_failed, "agent", "human")
+        raise PipelineHalt("human", msg)
 
     # ── STEP 4: VERIFY ────────────────────────────────────────────
     on_step("verify", "in-progress", "Reviewing agent's changes")
@@ -1094,7 +1225,14 @@ def run_pipeline(
         t0 = time.monotonic()
         rc_tests, test_out = run_shell(cfg.test_command, repo_dir, test_timeout_sec)
         took = f"{time.monotonic() - t0:.0f}s"
-        if rc_tests != 0:
+        if rc_tests == PYTEST_NO_TESTS_EXIT and "pytest" in cfg.test_command:
+            # pytest found nothing to run (e.g. a frontend-only repo, or tests
+            # not written yet) — that's not a failing test, so don't block,
+            # but say so plainly everywhere instead of claiming a pass.
+            on_step("verify", "in-progress", f"[TESTS] ⚠ No tests found — `{cfg.test_command}` collected 0 tests")
+            log_event("verify", f"No tests found by `{cfg.test_command}`; continuing without test coverage", "warning")
+            verification = f"⚠️ no tests found — `{cfg.test_command}` collected 0 tests, so nothing was tested."
+        elif rc_tests != 0:
             why = f"timed out after {cfg.test_timeout_min} min" if rc_tests is None else f"failed (exit code {rc_tests})"
             msg = f"Tests {why}: `{cfg.test_command}`. Nothing was pushed."
             log_event("verify", msg, "warning")
@@ -1103,8 +1241,9 @@ def run_pipeline(
             post_comment(f"{msg}\n\nLast lines of output:\n{_tail(test_out, 15)}", "verify", "human")
             set_ticket_status(cfg.status_failed, "verify", "human")
             raise PipelineHalt("human", msg)
-        on_step("verify", "in-progress", f"[TESTS] ✓ {cfg.test_command} passed ({took})")
-        verification = f"`{cfg.test_command}` passed ({took})."
+        else:
+            on_step("verify", "in-progress", f"[TESTS] ✓ {cfg.test_command} passed ({took})")
+            verification = f"`{cfg.test_command}` passed ({took})."
     elif cfg.verify_mode == "github_actions":
         verification = "GitHub Actions results are reported on this PR."
 
@@ -1215,6 +1354,9 @@ def run_pipeline(
         "were run; judge only the supplied diff and test changes. PASS only "
         "when there is no blocking defect apparent in the diff. If uncertain, "
         "FAIL and explain what needs human investigation.\n\n"
+        f"Automated test result for this change: {verification} "
+        "Base anything you say about tests on this result and the diff only — "
+        "don't describe tests that aren't in the diff.\n\n"
         "The first non-empty line of your response MUST be exactly "
         "`VERDICT: PASS` or `VERDICT: FAIL`. After that, give a concise "
         "review summary and list any blocking findings with file paths.\n\n"
@@ -1320,7 +1462,7 @@ def run_pipeline(
     push_url = f"https://{cfg.github_token}@github.com/{target_repo}.git"
     rc, out, err = run_cmd(["git", "push", push_url, branch_name], repo_dir, silent=True)
     if rc != 0:
-        msg = f"Push failed: {err[:300]}"
+        msg = git_failure_message(f"Pushing to {target_repo}", err, cfg.app_name, *secrets)
         on_step("pr", "failed", msg)
         post_comment(msg, "pr", "failed")
         raise PipelineHalt("failed", msg)

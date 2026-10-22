@@ -10,24 +10,23 @@ import posixpath
 import requests
 
 # Fallback when the repository can't be read, or its stack isn't recognised.
-GENERIC = {"stack": None, "test_command": "", "setup_command": ""}
+GENERIC = {"stack": None, "test_command": ""}
 DEFAULT_PROTECTED = [".github/workflows/*"]
 
-# (stack name, marker files at the repo root, setup command, test command) —
-# the first stack whose marker is present wins.
+# (stack name, marker files at the repo root, test command) — the first stack
+# whose marker is present wins. No setup/install command is ever suggested:
+# it would run on the pipeline server itself.
 _STACKS = [
-    ("Node.js (pnpm)", ("pnpm-lock.yaml",), "pnpm install --frozen-lockfile", "pnpm test"),
-    ("Node.js (yarn)", ("yarn.lock",), "yarn install --frozen-lockfile", "yarn test"),
-    ("Node.js", ("package-lock.json",), "npm ci", "npm test"),
-    ("Node.js", ("package.json",), "npm install", "npm test"),
-    ("Python", ("requirements.txt",), "pip install -r requirements.txt", "python -m pytest -q"),
-    ("Python", ("pyproject.toml", "setup.py", "pytest.ini", "tox.ini"), "pip install -e .", "python -m pytest -q"),
-    ("Go", ("go.mod",), "go mod download", "go test ./..."),
-    ("Java (Maven)", ("pom.xml",), "", "mvn -q test"),
-    ("Java (Gradle)", ("gradlew",), "", "./gradlew test"),
-    ("Java (Gradle)", ("build.gradle", "build.gradle.kts"), "", "gradle test"),
-    ("Rust", ("Cargo.toml",), "", "cargo test"),
-    (".NET", (".sln", ".csproj"), "", "dotnet test"),
+    ("Node.js (pnpm)", ("pnpm-lock.yaml",), "pnpm test"),
+    ("Node.js (yarn)", ("yarn.lock",), "yarn test"),
+    ("Node.js", ("package.json",), "npm test"),
+    ("Python", ("requirements.txt", "pyproject.toml", "setup.py", "pytest.ini", "tox.ini"), "python -m pytest -q"),
+    ("Go", ("go.mod",), "go test ./..."),
+    ("Java (Maven)", ("pom.xml",), "mvn -q test"),
+    ("Java (Gradle)", ("gradlew",), "./gradlew test"),
+    ("Java (Gradle)", ("build.gradle", "build.gradle.kts"), "gradle test"),
+    ("Rust", ("Cargo.toml",), "cargo test"),
+    (".NET", (".sln", ".csproj"), "dotnet test"),
 ]
 
 # Folders that hold infrastructure or deployment config — off-limits to the agent.
@@ -40,9 +39,9 @@ def suggest_from_paths(paths: list[str]) -> dict:
     root_exts = {posixpath.splitext(p)[1] for p in root}
 
     result = dict(GENERIC)
-    for stack, markers, setup, test in _STACKS:
+    for stack, markers, test in _STACKS:
         if any(m in root or (m.startswith(".") and m in root_exts) for m in markers):
-            result = {"stack": stack, "test_command": test, "setup_command": setup}
+            result = {"stack": stack, "test_command": test}
             break
 
     workflows = sorted(

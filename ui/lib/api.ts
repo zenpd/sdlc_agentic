@@ -17,6 +17,7 @@ export type RunApproval = {
   by: string | null;
   note: string | null;
   at: string | null;
+  requested_at: string | null;
 };
 export type CostStatus = 'pending' | 'estimated' | 'partial' | 'unavailable';
 
@@ -313,7 +314,7 @@ export const APP_SECRET_FIELDS = [
 export type AppSecretKey = typeof APP_SECRET_FIELDS[number];
 export type AppSettingKey = Exclude<keyof IntegrationConfig, AppSecretKey>
   | 'DEFAULT_PERSONA' | 'BRANCH_PREFIX' | 'GATE_MIN_WORDS' | 'REQUIRE_PR_APPROVAL' | 'PROTECTED_PATHS'
-  | 'VERIFY_MODE' | 'TEST_SETUP_COMMAND' | 'TEST_COMMAND' | 'TEST_TIMEOUT_MIN' | 'CI_WORKFLOW';
+  | 'AGENT_TIMEOUT_MIN' | 'VERIFY_MODE' | 'TEST_SETUP_COMMAND' | 'TEST_COMMAND' | 'TEST_TIMEOUT_MIN' | 'CI_WORKFLOW';
 
 // values = this app's own overrides ('' = not overridden), inherited = the
 // server-wide (.env) value a blank field falls back to, effective = what a
@@ -366,7 +367,6 @@ export type AppSuggestions = {
   reason: string | null;
   stack: string | null;
   test_command: string;
-  setup_command: string;
   ci_workflows: string[];
   protected_paths: string[];
 };
@@ -550,6 +550,39 @@ export function getAudit(params: { appId?: string; actor?: string } = {}): Promi
   if (params.actor) q.set('actor', params.actor);
   const qs = q.toString();
   return request<AuditEntry[]>(`/api/audit${qs ? `?${qs}` : ''}`);
+}
+
+// Two decimals; anything above zero but under a cent shows as "< $0.01"
+// rather than a misleading "$0.00".
+// Step logs without the agents' per-tool-call trace lines ([TOOL:…],
+// [RESULT:…], [DIFF:…]) — keeps "Modified: …", errors and test results.
+export function withoutAgentTrace(logs: Record<string, string[]>): Record<string, string[]> {
+  return Object.fromEntries(
+    Object.entries(logs).map(([step, lines]) => [step, lines.filter((line) => !/^\[(TOOL|RESULT|DIFF):/.test(line))]),
+  );
+}
+
+export function formatCost(usd: number): string {
+  if (usd > 0 && usd < 0.005) return '< $0.01';
+  return `$${usd.toFixed(2)}`;
+}
+
+// Seconds a run spent waiting for a person to approve it (still counting while pending).
+export function approvalWaitSec(run: RunRecord, nowMs: number = Date.now()): number | null {
+  const a = run.approval;
+  if (!a?.requested_at) return null;
+  const end = a.status !== 'pending' && a.at ? Date.parse(a.at) : nowMs;
+  return Math.max(0, Math.round((end - Date.parse(a.requested_at)) / 1000));
+}
+
+// Run time with the approval wait split out, so a run that sat waiting for a
+// person doesn't look slow: "4m 8s pipeline · 18m 30s waiting for approval".
+export function describeDuration(run: RunRecord): string {
+  const wait = approvalWaitSec(run);
+  if (wait == null) return formatDuration(run.duration_sec);
+  if (run.approval?.status === 'pending') return `waiting for approval · ${formatDuration(wait)}`;
+  if (run.duration_sec == null) return formatDuration(null);
+  return `${formatDuration(Math.max(0, run.duration_sec - wait))} pipeline · ${formatDuration(wait)} waiting for approval`;
 }
 
 export function formatDuration(sec: number | null): string {

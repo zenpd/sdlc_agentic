@@ -3,6 +3,8 @@
 import os
 import sys
 
+from types import SimpleNamespace
+
 import pytest
 
 from conftest import client, sign_in
@@ -179,6 +181,131 @@ def test_command_mode_failing_tests_block_the_pr(fake_world, shell):
     assert "1 failing" in fake_world.ticket.comments[-1]  # tail of the output goes to the ticket
 
 
+def test_pytest_finding_no_tests_does_not_block_but_is_reported(fake_world, shell, monkeypatch):
+    _, results = shell
+    results["python -m pytest -q"] = (5, "\nno tests ran in 0.01s")
+    bodies = _capture_pr_body(monkeypatch)
+    result = jira_bot.run_pipeline("701", config=_cfg(VERIFY_MODE="command", TEST_COMMAND="python -m pytest -q"))
+    assert result["status"] == "success" and fake_world.pushed
+    assert "no tests found" in bodies[0] and "passed" not in bodies[0]
+    assert "no tests found" in fake_world.ticket.comments[-1]
+
+
+def test_exit_code_5_from_other_test_runners_still_blocks(fake_world, shell):
+    _, results = shell
+    results["npm test"] = (5, "")
+    with pytest.raises(PipelineHalt) as halt:
+        jira_bot.run_pipeline("701", config=_cfg(VERIFY_MODE="command", TEST_COMMAND="npm test"))
+    assert "exit code 5" in halt.value.message and not fake_world.pushed
+
+
+# ── Clarity gate also checks the ticket belongs to this repository ──
+def _gate_sees(monkeypatch, files, answer):
+    import openhands.sdk as sdk
+    from openhands.sdk.llm import TextContent
+    prompts, agent_started = [], []
+    real_run_cmd = jira_bot.run_cmd
+
+    def run_cmd(cmd, cwd=None, silent=False):
+        if cmd == ["git", "ls-files"]:
+            return 0, "\n".join(files) + "\n", ""
+        return real_run_cmd(cmd, cwd, silent)
+
+    class GateLLM:
+        metrics = None
+        def __init__(self, **_): pass
+        def completion(self, messages):
+            prompts.append(messages[0].content[0].text)
+            return SimpleNamespace(message=SimpleNamespace(content=[TextContent(text=answer)]))
+
+    class Conv(FakeConversation):
+        def run(self): agent_started.append(True)
+    monkeypatch.setattr(jira_bot, "run_cmd", run_cmd)
+    monkeypatch.setattr(sdk, "LLM", GateLLM)
+    monkeypatch.setattr(sdk, "Conversation", Conv)
+    return prompts, agent_started
+
+
+def test_gate_rejects_a_ticket_meant_for_another_repository(fake_world, monkeypatch):
+    prompts, agent_started = _gate_sees(
+        monkeypatch, ["src/lighthouse_selection.py", "README.md", "docs/logo.png"],
+        "NO - Wrong repository: the ticket is about school activities, this repo is a lighthouse selector.")
+    with pytest.raises(PipelineHalt) as halt:
+        jira_bot.run_pipeline("701", config=_cfg())
+    assert halt.value.status == "human" and "Wrong repository" in halt.value.message
+    assert "src/lighthouse_selection.py" in prompts[0] and "logo.png" not in prompts[0]
+    assert "does this ticket belong to THIS repository" in prompts[0]
+    assert not agent_started and not fake_world.pushed  # caught before any agent tokens were spent
+    assert "doesn't look like it belongs to o/r" in fake_world.ticket.comments[-1]
+
+
+def test_gate_passes_a_ticket_that_fits_the_repository(fake_world, monkeypatch):
+    _, agent_started = _gate_sees(monkeypatch, ["src/app.py"], "YES - clear, and it extends src/app.py.")
+    assert jira_bot.run_pipeline("701", config=_cfg())["status"] == "success"
+    assert agent_started
+
+
+def test_agent_prompt_asks_for_absolute_paths_and_states_the_time_limit(fake_world, monkeypatch):
+    prompts = _capture_prompt(monkeypatch)
+    jira_bot.run_pipeline("701", config=_cfg(AGENT_TIMEOUT_MIN="4"))
+    assert "only accepts ABSOLUTE paths" in prompts[0] and "never relative ones like 'src/app.py'" in prompts[0]
+    assert "without a line range" in prompts[0] and "You have 4 minutes" in prompts[0]
+
+
+def test_repo_file_list_for_the_gate_is_bounded():
+    files = [f"src/m{i}.py" for i in range(250)] + ["a.png", "node_modules/x/index.js"]
+    text = jira_bot.summarize_repo_files(files)
+    assert text.count("\n") == 200 and text.endswith("… and 50 more files")
+    assert "a.png" not in text and "node_modules" not in text
+
+
+# ── Agent limits: a run that wanders is stopped, nothing is pushed ──
+def _agent_conversation(monkeypatch, status="finished"):
+    import openhands.sdk as sdk
+    seen = {}
+
+    class Conv(FakeConversation):
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+            self.state = SimpleNamespace(execution_status=SimpleNamespace(value=status))
+        def pause(self):
+            seen["paused"] = True
+            self.state.execution_status.value = "paused"
+    monkeypatch.setattr(sdk, "Conversation", Conv)
+    return seen
+
+
+def test_agent_time_limit_stops_the_run(fake_world, monkeypatch):
+    seen = _agent_conversation(monkeypatch)
+    timers = []
+
+    class InstantTimer:  # the limit "expires" as soon as the agent starts
+        def __init__(self, seconds, fn): timers.append(seconds); self.fn = fn; self.daemon = False
+        def start(self): self.fn()
+        def cancel(self): pass
+    monkeypatch.setattr(jira_bot.threading, "Timer", InstantTimer)
+
+    with pytest.raises(PipelineHalt) as halt:
+        jira_bot.run_pipeline("701", config=_cfg(AGENT_TIMEOUT_MIN="4"))
+    assert timers == [240] and seen["paused"]
+    assert halt.value.status == "human" and "ran out of time (4 min limit for Checkout)" in halt.value.message
+    assert not fake_world.pushed and "Nothing was pushed" in fake_world.ticket.comments[-1]
+
+
+def test_agent_step_limit_stops_the_run(fake_world, monkeypatch):
+    seen = _agent_conversation(monkeypatch, status="error")  # SDK's MaxIterationsReached
+    with pytest.raises(PipelineHalt) as halt:
+        jira_bot.run_pipeline("701", config=_cfg())
+    assert seen["max_iteration_per_run"] == jira_bot.AGENT_MAX_STEPS == 60
+    assert "step limit (60 steps)" in halt.value.message and not fake_world.pushed
+
+
+def test_agent_time_limit_defaults_to_5_minutes_and_is_validated():
+    assert _cfg().agent_timeout_min == 5
+    with pytest.raises(ValueError):
+        apps_store.create_app("Too slow", config={"AGENT_TIMEOUT_MIN": "45"})
+
+
 def test_command_mode_setup_failure_and_timeout(fake_world, shell):
     _, results = shell
     results["make deps"] = (2, "no rule")
@@ -260,10 +387,48 @@ def test_failed_ci_run_still_records_the_pr(monkeypatch):
 def test_every_app_setting_round_trips_through_the_api():
     sign_in("nikhil")  # admin
     samples = {"TICKET_PROVIDER": "ado", "TARGET_REPO": "o/r", "GATE_MIN_WORDS": "7", "REQUIRE_PR_APPROVAL": "true",
-               "VERIFY_MODE": "command", "TEST_COMMAND": "pytest -q", "TEST_TIMEOUT_MIN": "5", "CI_WORKFLOW": "ci.yml"}
+               "VERIFY_MODE": "command", "TEST_COMMAND": "pytest -q", "TEST_TIMEOUT_MIN": "5", "CI_WORKFLOW": "ci.yml",
+               "AGENT_TIMEOUT_MIN": "4"}
     body = {k: samples.get(k, f"value-{k.lower()}") for k in apps_store.SETTING_FIELDS}
     r = client.put("/api/apps/default/config", json=body)
     assert r.status_code == 200, r.text
     assert r.json()["values"] == body
     # an unknown field is rejected loudly instead of being ignored
     assert client.put("/api/apps/default/config", json={"NOT_A_SETTING": "x"}).status_code == 422
+
+
+# ── Credentials never leak into logs, ticket comments or the UI ─────
+FAKE_TOKEN = "gho_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4"
+
+
+def test_redact_removes_tokens_in_urls_bare_tokens_and_known_secrets():
+    text = (f"fatal: could not read Password for 'https://{FAKE_TOKEN}@github.com': terminal prompts disabled; "
+            f"also {FAKE_TOKEN} and pat-secret-value-123 and https://user:pw@example.com/x")
+    out = jira_bot.redact(text, "pat-secret-value-123")
+    assert FAKE_TOKEN not in out and "pat-secret-value-123" not in out and "user:pw" not in out
+    assert "https://***@github.com" in out and "https://***@example.com/x" in out
+
+
+def test_expired_token_at_push_gives_a_clear_message_and_leaks_nothing(fake_world, monkeypatch):
+    real_run_cmd, steps = jira_bot.run_cmd, []
+
+    def run_cmd(cmd, cwd=None, silent=False):
+        if cmd[:2] == ["git", "push"]:
+            return 128, "", (f"fatal: Cannot prompt because user interactivity has been disabled.\n"
+                             f"fatal: could not read Password for 'https://{FAKE_TOKEN}@github.com': terminal prompts disabled")
+        return real_run_cmd(cmd, cwd, silent)
+    monkeypatch.setattr(jira_bot, "run_cmd", run_cmd)
+
+    with pytest.raises(PipelineHalt) as halt:
+        jira_bot.run_pipeline("701", config=_cfg(GITHUB_TOKEN=FAKE_TOKEN),
+                              on_step=lambda key, state, log=None: steps.append(log or ""))
+    assert halt.value.status == "failed"
+    assert "expired or been revoked" in halt.value.message and "Re-select the repository" in halt.value.message
+    everything = halt.value.message + " ".join(steps) + " ".join(fake_world.ticket.comments)
+    assert FAKE_TOKEN not in everything and "gho_" not in everything
+
+
+def test_other_git_errors_are_shown_without_credentials():
+    msg = jira_bot.git_failure_message("Cloning o/r", f"fatal: repository 'https://{FAKE_TOKEN}@github.com/o/r.git/' not found",
+                                       "Checkout", FAKE_TOKEN)
+    assert msg.startswith("Cloning o/r failed: fatal: repository 'https://***@github.com/o/r.git/' not found")

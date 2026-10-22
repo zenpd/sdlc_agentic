@@ -5,13 +5,12 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import Nav from '@/components/Nav';
 import PageHeader from '@/components/PageHeader';
 import StatusBadge from '@/components/StatusBadge';
-import AgentActivity from '@/components/AgentActivity';
 import StageProgress from '@/components/StageProgress';
 import StepTracker from '@/components/StepTracker';
 import { useActiveApp } from '@/components/AppContext';
 import ApprovalPanel from '@/components/ApprovalPanel';
 import {
-  formatDuration, formatTime, getRuns,
+  describeDuration, formatCost, formatTime, getRuns, withoutAgentTrace,
   type RunRecord, type StepInfo, type StepState,
 } from '@/lib/api';
 
@@ -71,7 +70,7 @@ function RunHistoryItem({
         </div>
       )}
       <div style={{ marginTop: 8, fontSize: 11.5, color: 'var(--color-text-muted)' }}>
-        {persona ? `${persona} · ` : ''}{run.triggered_by ? `by @${run.triggered_by} · ` : ''}{formatTime(run.started_at)} · {formatDuration(run.duration_sec)}
+        {persona ? `${persona} · ` : ''}{run.triggered_by ? `by @${run.triggered_by} · ` : ''}{formatTime(run.started_at)} · {describeDuration(run)}
       </div>
     </button>
   );
@@ -236,7 +235,7 @@ function LogsContent() {
 
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px 18px', marginBottom: 22, color: 'var(--color-text-muted)', fontSize: 12 }}>
                   <span>Started {formatTime(selectedRun.started_at)}{selectedRun.triggered_by ? ` by @${selectedRun.triggered_by}` : ''}</span>
-                  <span>Duration {formatDuration(selectedRun.duration_sec)}</span>
+                  <span>Duration {describeDuration(selectedRun)}</span>
                   <span>Persona {personaName(selectedRun) ?? 'not recorded'}</span>
                   <span>Run {selectedRun.id}</span>
                 </div>
@@ -257,7 +256,7 @@ function LogsContent() {
                       ? 'still collecting'
                       : selectedRun.cost_usd == null
                         ? 'not available'
-                      : `$${selectedRun.cost_usd.toFixed(5)} USD`}
+                      : `${formatCost(selectedRun.cost_usd)} USD`}
                     {selectedRun.cost_status === 'partial' ? ' (partial estimate)' : ''}
                     {selectedRun.cost_status === 'estimated' ? ' (estimated)' : ''}
                   </span>
@@ -286,17 +285,10 @@ function LogsContent() {
                   />
                 </div>
 
-                <AgentActivity
-                  ticketKey={selectedRun.ticket_key}
-                  logs={selectedRun.logs}
-                  stepStates={stepStates}
-                  prUrl={selectedRun.pr_url}
-                />
-
                 <StepTracker
                   steps={STEPS.map(({ key, label }) => ({ key, label }))}
                   states={stepStates}
-                  logs={{ ...selectedRun.logs, agent: [] }}
+                  logs={withoutAgentTrace(selectedRun.logs)}
                 />
               </div>
             )}

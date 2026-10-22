@@ -193,6 +193,8 @@ body { padding-left: var(--sidebar-width); padding-top: var(--topbar-height); }
 .approval-panel { margin-bottom: 22px; padding: 18px 20px; border-radius: 16px; border: 1px solid #c9d7fb; background: linear-gradient(145deg, #f2f6ff, #f7f5ff); }
 .approval-panel h3 { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 780; }
 .approval-panel p { margin-top: 4px; font-size: 12.5px; color: var(--color-text-secondary); }
+.approval-panel p.approval-wait { margin-top: 8px; font-weight: 650; color: #8a5a00; }
+html.dark .approval-panel p.approval-wait { color: #f3c66b; }
 .approval-files { margin: 12px 0; display: flex; flex-wrap: wrap; gap: 6px; }
 .approval-files code { padding: 3px 8px; border-radius: 7px; background: #fff; border: 1px solid #dfe6f5; font-size: 11.5px; }
 .approval-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }

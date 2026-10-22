@@ -36,6 +36,7 @@ DEFAULT_FIELDS = [
     "DEFAULT_PERSONA",   # persona used when the ticket doesn't name one (else keyword match)
     "BRANCH_PREFIX",     # e.g. "feat/" -> feat/<ticket>-<summary>-<id>
     "GATE_MIN_WORDS",    # clarity gate: minimum description length before the LLM check
+    "AGENT_TIMEOUT_MIN", # coding agent time limit; it's stopped (nothing pushed) when exceeded
     # Governance (new_req.md point 10)
     "REQUIRE_PR_APPROVAL",  # "true" -> a maintainer must approve before any PR is opened
     "PROTECTED_PATHS",      # glob patterns the agent may never change, e.g. ".github/workflows/*, *.tf"
@@ -149,6 +150,9 @@ def _validate_settings(settings: dict[str, str]) -> None:
         raise ValueError("VERIFY_MODE must be blank, 'command' or 'github_actions'")
     if mode == "command" and not (settings.get("TEST_COMMAND") or _global_value("TEST_COMMAND")):
         raise ValueError("Set a TEST_COMMAND (e.g. 'pytest -q') to verify with a command")
+    agent_timeout = settings.get("AGENT_TIMEOUT_MIN")
+    if agent_timeout and (not agent_timeout.isdigit() or not 1 <= int(agent_timeout) <= 30):
+        raise ValueError("AGENT_TIMEOUT_MIN must be a whole number of minutes between 1 and 30")
     timeout = settings.get("TEST_TIMEOUT_MIN")
     if timeout and (not timeout.isdigit() or not 1 <= int(timeout) <= 120):
         raise ValueError("TEST_TIMEOUT_MIN must be a whole number of minutes between 1 and 120")

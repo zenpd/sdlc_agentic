@@ -7,7 +7,7 @@ import StatCard from '@/components/StatCard';
 import StatusBadge from '@/components/StatusBadge';
 import { useActiveApp } from '@/components/AppContext';
 import {
-  getStats, getRuns, getAppConfig, formatDuration, formatTime,
+  getStats, getRuns, getAppConfig, formatCost, formatDuration, formatTime,
   type RunStats, type RunRecord, type AppConfig,
 } from '@/lib/api';
 
@@ -166,7 +166,7 @@ export default function DashboardPage() {
           <StatCard label="Avg. delivery" value={stats ? formatDuration(stats.avg_duration_sec) : '—'} tone="pink" icon="clock" hint="Ticket → pull request" />
           <StatCard
             label="Estimated LLM cost this month"
-            value={stats?.monthly_cost_usd == null ? '—' : `$${stats.monthly_cost_usd.toFixed(5)}`}
+            value={stats?.monthly_cost_usd == null ? '—' : formatCost(stats.monthly_cost_usd)}
             tone="green"
             icon="dollar"
             hint={stats

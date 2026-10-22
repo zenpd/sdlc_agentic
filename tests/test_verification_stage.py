@@ -351,3 +351,55 @@ def test_pull_request_creation_rejects_unusable_github_response(
             "main",
             "PR body",
         )
+
+
+def _reviewer(monkeypatch, replies):
+    """Fake read-only reviewer that answers each run() with the next reply."""
+    sent = []
+    queue = list(replies)
+
+    class FakeLLM:
+        metrics = []
+        def model_copy(self, deep): return FakeLLM()
+        def reset_metrics(self): pass
+
+    current = {}
+
+    class FakeConversation:
+        def __init__(self, **kwargs):
+            self.state = SimpleNamespace(active_branch=lambda: ["event"])
+            current["conv"] = self
+        def send_message(self, message): sent.append(message)
+        def run(self): self.reply = queue.pop(0)
+
+    monkeypatch.setattr(openhands.sdk, "Agent", lambda **kwargs: None)
+    monkeypatch.setattr(openhands.sdk, "Conversation", FakeConversation)
+    monkeypatch.setattr(openhands.sdk.conversation, "get_agent_final_response",
+                        lambda events: current["conv"].reply)
+    steps = []
+    response = jira_bot._run_verification_agent(
+        llm=FakeLLM(), repo_dir=Path("."), prompt="Review this diff.",
+        on_step=lambda key, state, log=None: steps.append(log),
+    )
+    return response, sent, steps
+
+
+def test_reviewer_that_forgets_its_verdict_is_asked_once_more(monkeypatch):
+    response, sent, steps = _reviewer(monkeypatch, [
+        "The endpoint is implemented correctly and nothing regresses.",
+        "VERDICT: PASS\nThe endpoint is implemented correctly.",
+    ])
+    assert jira_bot._verification_verdict(response) == "PASS"
+    assert sent == ["Review this diff.", jira_bot.VERDICT_REMINDER]
+    assert any("asking it once more" in (s or "") for s in steps)
+
+
+def test_reviewer_still_without_a_verdict_fails_closed(monkeypatch):
+    response, sent, _ = _reviewer(monkeypatch, ["Looks fine to me.", "**VERDICT: PASS** looks fine"])
+    assert jira_bot._verification_verdict(response) is None  # still needs a human
+    assert len(sent) == 2  # asked only once more, never loops
+
+
+def test_reviewer_with_a_verdict_is_not_asked_again(monkeypatch):
+    _, sent, _ = _reviewer(monkeypatch, ["VERDICT: FAIL\nMissing tests."])
+    assert sent == ["Review this diff."]

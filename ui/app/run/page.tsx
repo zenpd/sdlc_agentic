@@ -5,9 +5,8 @@ import Nav from '@/components/Nav';
 import PageHeader from '@/components/PageHeader';
 import StepTracker from '@/components/StepTracker';
 import StatusBadge from '@/components/StatusBadge';
-import AgentActivity from '@/components/AgentActivity';
 import StageProgress from '@/components/StageProgress';
-import { runTicket, getRunStatus, formatDuration, type RunRecord, type StepInfo } from '@/lib/api';
+import { runTicket, getRunStatus, describeDuration, formatDuration, withoutAgentTrace, type RunRecord, type StepInfo } from '@/lib/api';
 import { useActiveApp } from '@/components/AppContext';
 import ApprovalPanel from '@/components/ApprovalPanel';
 
@@ -213,7 +212,7 @@ export default function RunPage() {
               <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                 {running && (
                   <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--color-text-muted)' }}>
-                    {formatDuration(elapsed)}
+                    {status === 'awaiting-approval' && record ? `⏸ ${describeDuration(record)}` : formatDuration(elapsed)}
                   </span>
                 )}
                 {status && <StatusBadge status={status} />}
@@ -229,17 +228,10 @@ export default function RunPage() {
               />
             </div>
 
-            <AgentActivity
-              ticketKey={ticketKey}
-              logs={logs}
-              stepStates={stepStates}
-              prUrl={prUrl}
-            />
-
             <StepTracker
               steps={STEPS.map(({ state, ...rest }) => rest)}
               states={stepStates}
-              logs={{ ...logs, agent: [] }}
+              logs={withoutAgentTrace(logs)}
             />
 
             {isTerminal && (
@@ -257,7 +249,7 @@ export default function RunPage() {
                       </a>
                     </p>
                     <p style={{ color: 'var(--color-text-secondary)' }}>
-                      Duration: {formatDuration(duration)}
+                      Duration: {record ? describeDuration(record) : formatDuration(duration)}
                     </p>
                   </div>
                 )}

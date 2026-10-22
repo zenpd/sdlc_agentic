@@ -55,7 +55,7 @@ def init_db() -> None:
         conn.execute("ALTER TABLE runs ADD COLUMN triggered_by TEXT")
     # Human sign-off before a PR opens (apps with REQUIRE_PR_APPROVAL).
     # approval_status: NULL (not needed) | pending | approved | rejected | expired
-    for column in ("approval_status", "approval_by", "approval_note", "approval_at"):
+    for column in ("approval_status", "approval_by", "approval_note", "approval_at", "approval_requested_at"):
         if column not in columns:
             conn.execute(f"ALTER TABLE runs ADD COLUMN {column} TEXT")
     if "prompt_tokens" not in columns:
@@ -222,8 +222,8 @@ def request_approval(run_id: str) -> None:
         conn = _get_conn()
         conn.execute(
             "UPDATE runs SET status = 'awaiting-approval', approval_status = 'pending', "
-            "approval_by = NULL, approval_note = NULL, approval_at = NULL WHERE id = ?",
-            (run_id,),
+            "approval_by = NULL, approval_note = NULL, approval_at = NULL, approval_requested_at = ? WHERE id = ?",
+            (datetime.now(timezone.utc).isoformat(), run_id),
         )
         conn.commit()
         conn.close()
@@ -355,6 +355,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
             "by": row["approval_by"],
             "note": row["approval_note"],
             "at": row["approval_at"],
+            "requested_at": row["approval_requested_at"],
         },
     }
 

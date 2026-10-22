@@ -13,7 +13,8 @@ from backend.repo_suggest import suggest_from_paths
 def test_python_repo_gets_pytest_and_its_workflows_protected():
     s = suggest_from_paths(["requirements.txt", "pytest.ini", "src/app.py",
                             ".github/workflows/ci.yml", ".github/workflows/deploy.yaml", ".github/images/x.png"])
-    assert (s["stack"], s["test_command"], s["setup_command"]) == ("Python", "python -m pytest -q", "pip install -r requirements.txt")
+    assert (s["stack"], s["test_command"]) == ("Python", "python -m pytest -q")
+    assert "setup_command" not in s  # never suggest installing packages on the pipeline server
     assert s["ci_workflows"] == ["ci.yml", "deploy.yaml"]
     assert s["protected_paths"] == [".github/workflows/*"]
 

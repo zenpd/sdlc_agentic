@@ -111,6 +111,7 @@ class FakeConversation:
     def __init__(self, **_): pass
     def send_message(self, _): pass
     def run(self): pass
+    def pause(self): pass
 
 
 @pytest.fixture
