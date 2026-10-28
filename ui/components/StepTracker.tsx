@@ -1,4 +1,4 @@
-export type StepState = 'pending' | 'in-progress' | 'success' | 'failed' | 'error' | 'human';
+export type StepState = 'pending' | 'in-progress' | 'success' | 'failed' | 'error' | 'human' | 'cancelled';
 
 export type Step = {
   key: string;
@@ -75,7 +75,10 @@ function ListTracker({ steps, states, logs }: ListProps) {
         const isActive = s === 'in-progress';
         const isHuman = s === 'human';
         const isFailed = s === 'failed' || s === 'error';
-        const dotBg = state === 'done'
+        const isCancelled = s === 'cancelled';
+        const dotBg = isCancelled
+          ? { background: '#64718b', borderColor: '#64718b' }
+          : state === 'done'
           ? { background: isFailed ? 'var(--color-red)' : isHuman ? '#d97706' : 'var(--color-accent-purple)', borderColor: isFailed ? 'var(--color-red)' : isHuman ? '#d97706' : 'var(--color-accent-purple)' }
           : isActive ? { borderColor: 'var(--color-accent-purple)' } : {};
 
@@ -103,7 +106,8 @@ function ListTracker({ steps, states, logs }: ListProps) {
                   style={isActive ? { color: 'var(--color-accent-purple)' } : isHuman ? { color: '#d97706', fontWeight: 600 } : state === 'done' ? { opacity: 0.7 } : {}}
                 >
                   {label}
-                  {isHuman && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 700, letterSpacing: '.04em' }}>· HUMAN REVIEW NEEDED</span>}
+                  {isHuman && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 700, letterSpacing: '.04em' }}>· NEEDS YOU</span>}
+                  {isCancelled && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 700, letterSpacing: '.04em' }}>· STOPPED</span>}
                 </div>
                 {logs?.[key] && (
                   <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 2 }}>

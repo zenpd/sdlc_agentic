@@ -39,9 +39,9 @@ Let me walk you through it."
 "Under the hood, every run this platform executes goes through the same seven-stage pipeline, fully automated:"
 
 - **Fetch** — pulls the ticket's title, description, and status straight from Jira or Azure DevOps.
-- **Assign** — takes ownership of the ticket on the tracker so it's clear it's being worked.
-- **In Progress** — moves the ticket's status forward automatically.
+- **Assign** — ensures the ticket belongs to the configured target user (and skips reassignment when it's already correct).
 - **Clarity Gate** — an LLM check that decides whether the ticket has *enough detail* to act on safely, before any code gets touched.
+- **In Progress** — after the clarity gate passes, moves the ticket into its active status just before implementation.
 - **Agent** — an autonomous coding agent clones the target repo, writes the change, and verifies its own work.
 - **PR** — opens a real, review-ready pull request with the diff.
 - **Update Ticket** — reports back to the ticket: links the PR, and moves the ticket's status to done.

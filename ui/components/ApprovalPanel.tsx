@@ -54,8 +54,10 @@ export default function ApprovalPanel({ run, onDecided }: { run: RunRecord; onDe
     <div className="approval-panel">
       <h3>🛡️ Approval needed before a pull request is opened</h3>
       <p>
-        The agent finished and verified its change. This application requires a maintainer to sign off before anything
-        is pushed. {run.triggered_by && <>Started by @{run.triggered_by}.</>}
+        {run.workflow_mode === 'manual'
+          ? 'Independent verification passed. This application requires a maintainer to sign off before the Manual PR stage becomes available.'
+          : 'The agent finished and verified its change. This application requires a maintainer to sign off before anything is pushed.'}
+        {' '}{run.triggered_by && <>Started by @{run.triggered_by}.</>}
       </p>
       {approvalWaitSec(run) != null && (
         <p className="approval-wait">

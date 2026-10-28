@@ -16,7 +16,13 @@ DEFAULT_LIMIT = 100
 
 _TRACE_PREFIXES = ("[TOOL:", "[RESULT:", "[DIFF:", "[AGENT-ERROR]")
 _SINCE_RE = re.compile(r"^(\d+)([hd])$")
-_TERMINAL_STATES: tuple[str, ...] = ("success", "failed", "human", "error")
+_TERMINAL_STATES: tuple[str, ...] = (
+    "success",
+    "failed",
+    "human",
+    "error",
+    "cancelled",
+)
 
 
 def _now() -> str:

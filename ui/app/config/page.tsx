@@ -105,8 +105,10 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 const SETTING_KEYS = [
-  'JIRA_BASE_URL', 'JIRA_USER_EMAIL', 'ADO_ORG_URL', 'ADO_PROJECT',
+  'JIRA_BASE_URL', 'JIRA_USER_EMAIL', 'ADO_ORG_URL', 'ADO_PROJECT', 'TARGET_ASSIGNEE',
   'TARGET_REPO', 'TARGET_BRANCH', 'AZURE_OPENAI_ENDPOINT', 'AZURE_OPENAI_DEPLOYMENT',
+  'AZURE_OPENAI_CLARITY_GATE_DEPLOYMENT', 'AZURE_OPENAI_CODING_DEPLOYMENT',
+  'AZURE_OPENAI_VERIFICATION_DEPLOYMENT',
   'STATUS_DONE', 'STATUS_IN_PROGRESS', 'STATUS_FAILED', 'NOTIFY_ON_SUCCESS', 'NOTIFY_ON_FAILURE',
   'NOTIFY_EMAIL_TO', 'SMTP_HOST', 'SMTP_PORT', 'SMTP_FROM', 'SMTP_USERNAME', 'SMTP_STARTTLS',
 ] as const;
@@ -335,6 +337,13 @@ export default function ConfigPage() {
                   <SecretField label="ADO Personal Access Token" state={secretState.ADO_PAT} value={secrets.ADO_PAT} onChange={setSecret('ADO_PAT')} />
                 </>
               )}
+              <Field
+                label="Target agent or user"
+                value={fields.TARGET_ASSIGNEE || ''}
+                onChange={setField('TARGET_ASSIGNEE')}
+                inherited={inh('TARGET_ASSIGNEE')}
+                placeholder={provider === 'ado' ? 'user@company.com' : 'Jira account ID or email'}
+              />
             </Section>
 
             <Section title="Outbound notifications">
@@ -413,6 +422,35 @@ export default function ConfigPage() {
               <Field label="Endpoint" value={fields.AZURE_OPENAI_ENDPOINT || ''} onChange={setField('AZURE_OPENAI_ENDPOINT')} inherited={inh('AZURE_OPENAI_ENDPOINT')} placeholder="https://your-resource.cognitiveservices.azure.com/" />
               <Field label="Deployment" value={fields.AZURE_OPENAI_DEPLOYMENT || ''} onChange={setField('AZURE_OPENAI_DEPLOYMENT')} inherited={inh('AZURE_OPENAI_DEPLOYMENT')} placeholder="gpt-4.1-mini" />
               <SecretField label="API Key" state={secretState.AZURE_OPENAI_API_KEY} value={secrets.AZURE_OPENAI_API_KEY} onChange={setSecret('AZURE_OPENAI_API_KEY')} />
+            </Section>
+
+            <Section title="Stage-specific model deployments">
+              <Field
+                label="Clarity Gate deployment"
+                value={fields.AZURE_OPENAI_CLARITY_GATE_DEPLOYMENT || ''}
+                onChange={setField('AZURE_OPENAI_CLARITY_GATE_DEPLOYMENT')}
+                inherited={inh('AZURE_OPENAI_CLARITY_GATE_DEPLOYMENT')}
+                placeholder="Use the default Azure deployment"
+              />
+              <Field
+                label="Agent Coding deployment"
+                value={fields.AZURE_OPENAI_CODING_DEPLOYMENT || ''}
+                onChange={setField('AZURE_OPENAI_CODING_DEPLOYMENT')}
+                inherited={inh('AZURE_OPENAI_CODING_DEPLOYMENT')}
+                placeholder="Use the default Azure deployment"
+              />
+              <Field
+                label="Verification Review deployment"
+                value={fields.AZURE_OPENAI_VERIFICATION_DEPLOYMENT || ''}
+                onChange={setField('AZURE_OPENAI_VERIFICATION_DEPLOYMENT')}
+                inherited={inh('AZURE_OPENAI_VERIFICATION_DEPLOYMENT')}
+                placeholder="Use the default Azure deployment"
+              />
+              <div style={{ gridColumn: '1 / -1', fontSize: 12, color: 'var(--color-text-muted)' }}>
+                Optional overrides for this stage. Leave a field blank to inherit its server default;
+                if that is also blank, the Azure OpenAI default deployment above is used. Enter
+                deployment names configured on the same Azure OpenAI resource.
+              </div>
             </Section>
 
             <Section title="Status / state names">
@@ -522,7 +560,7 @@ export default function ConfigPage() {
                     <option value="true">Required — a maintainer must approve</option>
                     <option value="false">Not required</option>
                   </select>
-                  <div className="field-hint">When required, runs pause after the agent finishes until someone approves</div>
+                  <div className="field-hint">When required, a maintainer approves before code is pushed and a PR is opened.</div>
                 </div>
                 <div style={{ gridColumn: 'span 2' }}>
                   <label className="label-main">Protected paths (agent may never change these)</label>

@@ -12,9 +12,9 @@ export const appInitials = (name: string) =>
 const NAV_ITEMS: Array<{ label: string; href: string; icon: string; color: string; minRole?: Role }> = [
   { label: 'Dashboard', href: '/', icon: 'home', color: '#7c3aed' },
   { label: 'Applications', href: '/applications', icon: 'github', color: '#0ea5e9' },
-  { label: 'Run', href: '/run', icon: 'play', color: '#10b981' },
+  { label: 'Run', href: '/run?new_run=1', icon: 'play', color: '#10b981' },
   { label: 'Bulk Request', href: '/bulk', icon: 'tickets', color: '#f59e0b' },
-  { label: 'Logs', href: '/logs', icon: 'file', color: '#3b82f6' },
+  { label: 'History', href: '/logs', icon: 'file', color: '#3b82f6' },
   { label: 'Skills', href: '/skills', icon: 'award', color: '#ec4899' },
   { label: 'Config', href: '/config', icon: 'settings', color: '#f97316' },
   { label: 'Activity', href: '/activity', icon: 'activity', color: '#14b8a6', minRole: 'maintainer' },
@@ -159,6 +159,13 @@ export default function Nav() {
   };
 
   const initials = githubUser?.login?.slice(0, 2).toUpperCase() ?? '··';
+  const startNewRun = (event: React.MouseEvent<HTMLAnchorElement>) => {
+    setMobileOpen(false);
+    if (pathname === '/run') {
+      event.preventDefault();
+      window.dispatchEvent(new Event('sdlc:new-run'));
+    }
+  };
 
   return (
     <>
@@ -270,7 +277,7 @@ export default function Nav() {
       {mobileOpen && <div className="sidebar-backdrop" onClick={() => setMobileOpen(false)} />}
 
       <aside className={`sidebar${mobileOpen ? ' open' : ''}`}>
-        <Link href="/run" className="sidebar-cta" onClick={() => setMobileOpen(false)}>
+        <Link href="/run?new_run=1" className="sidebar-cta" onClick={startNewRun}>
           <svg {...STROKE}><path d="M12 5v14M5 12h14" /></svg>
           New run
         </Link>
@@ -280,8 +287,8 @@ export default function Nav() {
             <Link
               key={href}
               href={href}
-              onClick={() => setMobileOpen(false)}
-              className={`nav-link${pathname === href ? ' active' : ''}`}
+              onClick={label === 'Run' ? startNewRun : () => setMobileOpen(false)}
+              className={`nav-link${pathname === href.split('?')[0] ? ' active' : ''}`}
             >
               <span className="nav-icon" style={{ '--nav-color': color } as React.CSSProperties}>
                 <NavIcon name={icon} />

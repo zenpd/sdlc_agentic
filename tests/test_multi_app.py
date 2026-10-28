@@ -23,6 +23,20 @@ def test_pipeline_config_defaults_follow_provider():
     assert (jira.status_failed, jira.status_done, jira.status_in_progress) == ("Human In Loop", "Done", "In Progress")
     assert jira.branch_prefix == "feat/" and jira.gate_min_words == 5
     assert jira.azure_model == "azure/gpt-4.1-mini"
+    assert jira.clarity_gate_model == jira.azure_model
+    assert jira.coding_model == jira.azure_model
+    assert jira.verification_model == jira.azure_model
+
+
+def test_pipeline_config_stage_deployments_fall_back_to_default():
+    cfg = PipelineConfig.from_settings({
+        "AZURE_OPENAI_DEPLOYMENT": "shared-deployment",
+        "AZURE_OPENAI_CLARITY_GATE_DEPLOYMENT": "clarity-deployment",
+        "AZURE_OPENAI_CODING_DEPLOYMENT": "coding-deployment",
+    })
+    assert cfg.clarity_gate_model == "azure/clarity-deployment"
+    assert cfg.coding_model == "azure/coding-deployment"
+    assert cfg.verification_model == "azure/shared-deployment"
 
 
 def test_pipeline_config_per_app_defaults_and_validation():
@@ -61,6 +75,19 @@ def test_app_overrides_layer_on_top_of_env():
     assert resolved["GITHUB_TOKEN"] == "checkout-token"
     assert resolved["ADO_PAT"] == "global-pat"  # not overridden -> inherited
     assert apps_store.resolve_settings("default")["TARGET_REPO"] == "global/repo"  # untouched
+
+
+def test_stage_deployments_can_be_overridden_per_app():
+    app = apps_store.create_app(
+        "Model choices",
+        config={"AZURE_OPENAI_CODING_DEPLOYMENT": "coding-v2"},
+    )
+    settings = apps_store.resolve_settings(app["id"])
+    assert settings["AZURE_OPENAI_CODING_DEPLOYMENT"] == "coding-v2"
+    assert settings["AZURE_OPENAI_CLARITY_GATE_DEPLOYMENT"] == ""
+    config = PipelineConfig.from_settings(settings)
+    assert config.coding_model == "azure/coding-v2"
+    assert config.clarity_gate_model == "azure/gpt-4.1-mini"
 
 
 def test_app_config_never_exposes_secret_values():

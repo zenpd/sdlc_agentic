@@ -124,6 +124,7 @@ celerybeat.pid
 # git clone/push URL). Never version this.
 runs.db
 runs.db-journal
+backend/manual_workspaces/
 
 # Environments
 .env

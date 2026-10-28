@@ -286,8 +286,8 @@ def test_new_runs_expose_a_separate_verify_step(tmp_path, monkeypatch):
     assert step_keys == [
         "fetch",
         "assign",
-        "in_progress",
         "gate",
+        "in_progress",
         "agent",
         "verify",
         "pr",

@@ -1,6 +1,6 @@
 """API tests for structured run-event recording and querying."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -170,6 +170,66 @@ def test_run_token_and_cost_usage_is_saved_and_scoped_to_dashboard_stats(monkeyp
     assert stats["monthly_incomplete_cost_runs"] == 1
     billing_stats = client.get("/api/stats", params={"app_id": "billing"}).json()
     assert billing_stats["monthly_cost_usd"] is None
+
+
+@pytest.mark.usefixtures("database")
+def test_monthly_usage_is_attributed_to_usage_month_not_run_start():
+    now = datetime.now(timezone.utc)
+    month_start = now.replace(day=1)
+    previous_month = month_start - timedelta(days=1)
+    runs_db.create_run(
+        "started-previous-month",
+        "T-1",
+        previous_month.isoformat(),
+        "checkout",
+    )
+    runs_db.record_usage("started-previous-month", 500, 100, 0.25, 1, 1)
+
+    runs_db.create_run(
+        "used-previous-month",
+        "T-2",
+        now.isoformat(),
+        "checkout",
+    )
+    runs_db.record_usage("used-previous-month", 200, 50, 0.10, 1, 1)
+    conn = runs_db._get_conn()
+    conn.execute(
+        "UPDATE run_usage SET recorded_at = ? WHERE run_id = ?",
+        (previous_month.isoformat(), "used-previous-month"),
+    )
+    conn.commit()
+    conn.close()
+
+    stats = client.get("/api/stats", params={"app_id": "checkout"}).json()
+    assert stats["monthly_cost_usd"] == pytest.approx(0.25)
+    assert stats["monthly_prompt_tokens"] == 500
+    assert stats["monthly_completion_tokens"] == 100
+    assert stats["monthly_usage_runs"] == 1
+
+
+@pytest.mark.usefixtures("database")
+def test_legacy_run_usage_is_backfilled_once_using_run_start_month():
+    started_at = datetime.now(timezone.utc).isoformat()
+    runs_db.create_run("legacy", "T-1", started_at, "checkout")
+    conn = runs_db._get_conn()
+    conn.execute(
+        """
+        UPDATE runs
+        SET prompt_tokens = 300, completion_tokens = 75, cost_usd = 0.12,
+            llm_request_count = 2, priced_request_count = 2, cost_status = 'estimated'
+        WHERE id = 'legacy'
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    runs_db.init_db()
+    runs_db.init_db()
+    stats = client.get("/api/stats", params={"app_id": "checkout"}).json()
+    assert stats["monthly_cost_usd"] == pytest.approx(0.12)
+    assert stats["monthly_prompt_tokens"] == 300
+    assert stats["monthly_completion_tokens"] == 75
+    assert stats["monthly_usage_runs"] == 1
 
 
 @pytest.mark.usefixtures("database")

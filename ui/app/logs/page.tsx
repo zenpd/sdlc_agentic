@@ -25,7 +25,7 @@ const STEPS: StepInfo[] = [
   { key: 'jira', label: 'Updating ticket', state: 'pending' },
 ];
 
-const STATUSES = ['in-progress', 'awaiting-approval', 'success', 'failed', 'error', 'human'] as const;
+const STATUSES = ['in-progress', 'awaiting-approval', 'awaiting-human', 'success', 'failed', 'error', 'human'] as const;
 
 function ticketSummary(run: RunRecord): string | null {
   const line = run.logs.fetch?.[0] ?? '';
@@ -235,6 +235,7 @@ function LogsContent() {
 
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px 18px', marginBottom: 22, color: 'var(--color-text-muted)', fontSize: 12 }}>
                   <span>Started {formatTime(selectedRun.started_at)}{selectedRun.triggered_by ? ` by @${selectedRun.triggered_by}` : ''}</span>
+                  <span>Mode {selectedRun.workflow_mode}</span>
                   <span>Duration {describeDuration(selectedRun)}</span>
                   <span>Persona {personaName(selectedRun) ?? 'not recorded'}</span>
                   <span>Run {selectedRun.id}</span>
@@ -277,6 +278,17 @@ function LogsContent() {
                 )}
 
                 <ApprovalPanel run={selectedRun} onDecided={() => void refreshRuns()} />
+                {selectedRun.status === 'awaiting-human' && selectedRun.workflow_mode === 'manual' && (
+                  <div className="tip-box warn" style={{ marginBottom: 18 }}>
+                    <b>Manual stage awaiting completion</b>
+                    <p style={{ marginBottom: 10 }}>
+                      {selectedRun.manual_task?.label ?? 'A workflow stage'} needs a human result before this run can continue.
+                    </p>
+                    <button className="btn-secondary" onClick={() => router.push(`/run?manual_run=${encodeURIComponent(selectedRun.id)}`)}>
+                      Continue manual task
+                    </button>
+                  </div>
+                )}
 
                 <div style={{ marginBottom: 26 }}>
                   <StageProgress

@@ -346,6 +346,65 @@ html.dark .btn-danger:disabled:hover { background: transparent; }
 .input-main::placeholder { color: var(--color-text-muted); }
 .label-main { display: block; margin-bottom: 7px; font-size: 12px; font-weight: 700; color: var(--color-text-secondary); }
 
+/* ── assisted implementation editor ── */
+.agent-confidence {
+  position: relative; display: grid; grid-template-columns: 90px minmax(0, 1fr);
+  gap: 12px; align-items: center; padding: 14px 16px 21px;
+  overflow: hidden; border: 1px solid #e8c77d; border-radius: 10px;
+  background: linear-gradient(120deg, #fff8e9, #fffdf7); color: #493919;
+}
+.agent-confidence.high { border-color: #9bd5b0; background: linear-gradient(120deg, #edfbf1, #fbfffc); color: #194d32; }
+.agent-confidence-score { display: grid; justify-items: center; gap: 2px; }
+.agent-confidence-score strong { font-size: 25px; line-height: 1.1; }
+.agent-confidence-score span { color: #71634b; font-size: 10px; text-align: center; }
+.agent-confidence.high .agent-confidence-score span { color: #4b745b; }
+.agent-confidence-details > strong { font-size: 13px; }
+.agent-confidence-details p { margin: 4px 0; font-size: 12px; line-height: 1.45; }
+.agent-confidence-details small { color: #74694f; font-size: 10px; line-height: 1.4; }
+.agent-confidence.high .agent-confidence-details small { color: #557362; }
+.agent-confidence-meter { position: absolute; right: 16px; bottom: 8px; left: 16px; height: 4px; overflow: visible; border-radius: 4px; background: #e8dfcb; }
+.agent-confidence.high .agent-confidence-meter { background: #d3e8d9; }
+.agent-confidence-meter span { display: block; height: 100%; border-radius: inherit; background: #c58a27; }
+.agent-confidence.high .agent-confidence-meter span { background: #299556; }
+.agent-confidence-meter i { position: absolute; top: -3px; width: 2px; height: 10px; background: #414b59; }
+.review-ide { overflow: hidden; border: 1px solid #293345; border-radius: 10px; background: #1e1e1e; color: #d4d4d4; }
+.review-ide-toolbar, .review-editor-heading, .review-editor-footer {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+}
+.review-ide-toolbar { min-height: 44px; padding: 5px 8px; background: #181c24; border-bottom: 1px solid #303846; }
+.review-file-tabs { display: flex; flex: 1; min-width: 0; overflow-x: auto; }
+.review-apply-button { min-height: 32px; padding: 0 12px; flex-shrink: 0; border-radius: 7px; font-size: 12px; }
+.review-file-tab {
+  max-width: 300px; padding: 8px 11px; overflow: hidden; color: #aeb8c8;
+  background: transparent; border: 0; border-bottom: 2px solid transparent;
+  font: 12px var(--font-mono), ui-monospace, Consolas, monospace; text-overflow: ellipsis; white-space: nowrap;
+}
+.review-file-tab:hover { background: #222936; }
+.review-file-tab.active { color: #f0f3f8; background: #222936; border-bottom-color: #8b83ff; }
+.review-editor-heading { min-height: 42px; padding: 0 13px; background: #202630; border-bottom: 1px solid #303846; }
+.review-editor-heading > div:first-child { display: flex; min-width: 0; align-items: center; gap: 9px; overflow: hidden; }
+.review-editor-heading strong { overflow: hidden; color: #e0e5ee; font: 12px var(--font-mono), ui-monospace, Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.review-editor-status { color: #929daf; font-size: 11px; white-space: nowrap; }
+.review-editor-footer { min-height: 34px; padding: 4px 12px; color: #aeb8c8; background: #202630; border-top: 1px solid #303846; font-size: 11px; }
+.review-delete-toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.review-delete-toggle input { accent-color: #8b83ff; }
+.review-comment-composer { padding: 13px; background: #181c24; border-top: 1px solid #303846; }
+.review-comment-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: #dbe2ef; font-size: 12px; }
+.review-comment-heading span { color: #9da9bd; font: 11px var(--font-mono), ui-monospace, Consolas, monospace; }
+.review-selected-text, .review-inline-comment code {
+  display: block; margin-top: 8px; padding: 7px 9px; overflow: auto;
+  color: #e3c88a; background: #252a32; border-radius: 5px;
+  font: 11px var(--font-mono), ui-monospace, Consolas, monospace; white-space: pre-wrap;
+}
+.review-comment-input-row { display: flex; align-items: flex-start; gap: 9px; margin-top: 8px; }
+.review-comment-input-row .input-main { min-height: 60px; color: #e5e9f0; background: #222936; border-color: #3a4556; border-radius: 7px; font-size: 12px; resize: vertical; }
+.review-comment-input-row .btn-secondary { min-height: 38px; color: #e3e7ef; background: #293345; border-color: #46536a; border-radius: 7px; font-size: 12px; }
+.review-comments-list { display: grid; gap: 8px; margin-top: 10px; }
+.review-inline-comment { padding: 9px 10px; border: 1px solid #394457; border-left: 3px solid #d5a84f; border-radius: 6px; background: #222936; }
+.review-inline-comment p { margin: 8px 0 0; color: #e0e5ee; font-size: 12px; white-space: pre-wrap; }
+.review-remove-comment { padding: 2px 6px; color: #b7c1d1; background: transparent; border: 0; font: inherit; font-size: 11px; cursor: pointer; }
+.review-remove-comment:hover { color: #fff; text-decoration: underline; }
+
 /* ── status badge ── */
 .badge {
   display: inline-flex; align-items: center; gap: 6px;
@@ -599,6 +658,15 @@ html.dark .feature-arrow { background: #22304a; color: #c3cee2; }
 html.dark .tip-box { background: linear-gradient(145deg, #1b2a45, #241f45); }
 html.dark .tip-box.warn { background: linear-gradient(145deg, #3a2a17, #3a1d24); }
 html.dark .tip-box p { color: #9baac3; }
+html.dark .review-editor-heading { background: #202630; }
+
+@media (max-width: 640px) {
+  .agent-confidence { grid-template-columns: 68px minmax(0, 1fr); gap: 8px; padding-right: 10px; padding-left: 10px; }
+  .agent-confidence-score strong { font-size: 21px; }
+  .review-ide-toolbar { align-items: center; flex-direction: row; }
+  .review-comment-input-row { flex-direction: column; }
+  .review-comment-input-row .btn-secondary { align-self: flex-end; }
+}
 html.dark .table-main td, html.dark .row-item, html.dark .kv-row { border-color: #253249; }
 html.dark .badge.pending { background: #253249; color: #9baac3; }
 html.dark .account-menu { background: #182235; }

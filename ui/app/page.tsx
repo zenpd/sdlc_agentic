@@ -137,7 +137,7 @@ export default function DashboardPage() {
             </p>
             <div className="hero-actions">
               <Link href="/run" className="hero-btn-primary">▷ Launch pipeline</Link>
-              <Link href="/logs" className="hero-btn-secondary">View logs</Link>
+              <Link href="/logs" className="hero-btn-secondary">View history</Link>
             </div>
           </div>
           <LivePreview lines={previewLines(latest)} />

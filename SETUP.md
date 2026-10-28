@@ -7,23 +7,94 @@ Jira automation bot powered by OpenHands SDK. Picks up tickets, runs an AI codin
 ## Architecture
 
 ```
-jira_bot.py          → main pipeline (6-step flow)
-jira_tool.py         → Jira API wrapper
-ui/                  → Next.js frontend (React + Tailwind)
-openhands-sdk/       → SDK package (installed dependency)
-openhands-tools/     → Tool package (installed dependency)
+jira_bot.py             → pipeline execution and provider-neutral coordination
+workflow.py             → canonical stage definitions for the current workflow
+stages/ticket.py         → ticket parsing and routing normalization
+jira_tool.py / ado_tool.py → ticket-provider adapters
+ui/                     → Next.js dashboard
+openhands-sdk/          → vendored SDK workspace package
+openhands-tools/        → vendored tools workspace package
 ```
 
 ### Pipeline Flow
 
 | Step | Name | What happens |
 |------|------|-------------|
-| 1 | **Fetch** | JQL query picks up an `Agent-ready` ticket |
-| 2 | **Clarity Gate** | LLM validates the description has enough detail |
-| 3 | **Agent Run** | Clones repo, AI agent edits code, runs verification |
-| 4 | **Verify** | Checks `git diff` for modifications + pip dry-run |
-| 5 | **PR** | Creates branch, commits, pushes, opens GitHub PR |
-| 6 | **Report** | Comments on Jira, transitions status to Done |
+| 1 | **Fetch** | Reads a Jira or Azure DevOps ticket and normalizes its details |
+| 2 | **Assign** | Ensures the ticket is assigned to the configured target user |
+| 3 | **Clarity Gate** | Automatically analyzes requirements; asks specific human clarification questions if needed, then rechecks |
+| 4 | **In progress** | After the gate passes, moves the ticket to its active state before implementation |
+| 5 | **Implementation** | OpenHands edits the target repository |
+| 6 | **Verification** | Independently reruns configured checks and reviews the approved diff against ticket requirements |
+| 7 | **Pull request** | Pushes the branch, opens a PR, and optionally waits for CI |
+| 8 | **Report** | Comments on the ticket and updates its final status |
+
+The current flow remains sequential and preserves its existing behavior. Stage
+metadata is centralized in `backend/workflow.py`, and ticket parsing/routing
+normalization is isolated in `backend/stages/ticket.py`.
+
+### Run modes
+
+Users can select a mode when starting a run:
+
+- **Automatic** runs every stage in the current sequence. Configured approval
+  and existing error/safety conditions can still pause or stop it.
+- **Assisted** creates one persisted human task at a time for stages needing
+  human input, while automatically running configured integrations and checks.
+  Ticket assignment follows Automatic mode: it uses the configured
+  target user, or the integration account when no target is configured. After
+  the clarity gate passes, the ticket is moved to its active state automatically before implementation.
+  The clarity gate analyzes the ticket automatically. If it needs clarification,
+  it pauses with specific questions and suggested summary/description; the human
+  can edit those fields, add relevant context, and provide answers. The gate runs
+  again and decides whether work can continue—there is no manual pass override.
+  When clear, the coding agent loads the approved ticket summary and description,
+  clones the configured target branch, and follows repository coding instructions
+  before proposing code. The human can review and edit each proposed file and
+  apply edits to the implementation workspace, request another coding-agent
+  revision, or accept the code. Acceptance runs the configured
+  setup and test commands against the final human-approved files, checks diff
+  hygiene and protected paths, and saves the branch, local commit, changed files,
+  final diff, and test result as Verification-stage context. Verification then
+  independently reruns configured checks in an isolated Git worktree and uses a
+  read-only reviewer to compare the final diff with the approved requirements.
+  Its report displays check outcomes and output, requirement coverage, and
+  findings and explains why the outcome passed or failed. A human can accept a
+  successful report, submit evidence from their own verification when they
+  disagree with or need to supplement the automated report, request fixes
+  (returning to the coding agent), or flag a concern and stop the run. Human
+  verification decisions are recorded with reviewer and evidence; protected
+  paths remain enforced. If maintainer approval is configured, it is requested
+  before any branch is published or PR is created. After approval, the configured
+  GitHub integration publishes the reviewed branch and creates (or reuses) an
+  open pull request to the configured target branch. The UI displays its URL,
+  number, source and target branches, and creation evidence. The service verifies
+  the PR is open and matches the approved commit, repository, branches, and
+  changed files, then automatically continues to the final ticket update. On
+  creation failure, the task preserves the error and offers retry or a manual
+  URL fallback that receives the same validation.
+  The final ticket stage automatically composes a comment from
+  the approved ticket requirements, implementation summary and changed files,
+  verification outcome, and PR URL. It checks the ticket's current status,
+  performs the configured final transition only if needed, writes the comment,
+  and re-reads the ticket and its comments to confirm the result. The generated
+  status, PR link, comment, and evidence are recorded automatically; provider
+  confirmation completes the run without another human click. Failed updates
+  remain retryable, and a run-specific marker prevents duplicate completion
+  comments on retry.
+  Configure linting and type checks as part of the application's test command
+  when they should run as required verification checks.
+  If the backend restarts during agent generation, validation, verification, or
+  PR creation or ticket update, the interrupted work is surfaced as a retryable
+  human task instead of remaining stuck.
+
+Automatic mode remains the default for API and webhook-started runs. Configured
+per-app approval before PR publication remains available in either mode.
+Arbitrary per-stage checkpoint configuration and durable recovery of automated
+runs are future work. Active Automatic runs can be stopped from the Run page.
+Cancellation is cooperative: an in-flight operation is allowed to finish, but
+no later stage will start. The active run can be restored on the Run page after
+navigating away.
 
 ---
 
@@ -45,15 +116,27 @@ Create `.env` in the project root:
 AZURE_OPENAI_ENDPOINT="https://<your-endpoint>.cognitiveservices.azure.com/"
 AZURE_OPENAI_API_KEY=<your-key>
 AZURE_OPENAI_DEPLOYMENT="gpt-4.1-mini"
+# Optional per-stage deployment overrides (blank/unset uses AZURE_OPENAI_DEPLOYMENT)
+# AZURE_OPENAI_CLARITY_GATE_DEPLOYMENT="gpt-4.1-mini"
+# AZURE_OPENAI_CODING_DEPLOYMENT="your-coding-deployment"
+# AZURE_OPENAI_VERIFICATION_DEPLOYMENT="your-review-deployment"
 
 # Jira
 JIRA_BASE_URL=https://<your-domain>.atlassian.net
 JIRA_USER_EMAIL=<your-email>
 JIRA_API_TOKEN=<your-token>
+TARGET_ASSIGNEE=<Jira account ID or email>
 
 # GitHub
 GITHUB_TOKEN=<github-pat>
 ```
+
+`TARGET_ASSIGNEE` is the user who should own tickets during a run. Azure DevOps
+accepts an identity such as an email address; Jira accepts a unique account ID
+or email. If it is unset, the integration assigns to its own account, as in
+Automatic mode. Assignment is skipped when the ticket already has that user.
+The workflow moves the ticket to the configured in-progress status only after
+the clarity gate passes, immediately before implementation starts.
 
 ### Install
 
@@ -115,6 +198,7 @@ Two distinct design systems:
 ### Run API
 
 - `POST /api/run-ticket` — start a pipeline run
+- `POST /api/runs/{id}/cancel` — request cancellation of an active Automatic run
 - `GET /api/run-status/{id}` — poll run progress
 - `GET /api/stats` — aggregate run stats
 - `GET /api/runs` — list all runs
@@ -153,6 +237,7 @@ LiteLLM/OpenHands usage metrics are saved to each run as prompt tokens,
 completion tokens, total tokens, and estimated USD cost when the configured
 model has pricing data. The run-history API includes these fields, and
 `GET /api/stats` includes current-month totals for the selected application.
+Usage is attributed to the month it is reported, not the month the run began.
 The dashboard shows that monthly estimate; the Logs page shows the usage for
 the selected run.
 
@@ -160,7 +245,50 @@ Costs are labeled as estimated because provider/model pricing can change. If
 LiteLLM cannot calculate a cost for every completion, the run is marked
 partial; if no completion has a known price, cost is unavailable rather than
 reported as zero. Token usage and any available partial estimate are still
-retained. Existing runs are not backfilled.
+retained. Existing run-level totals are preserved and assigned to the run's
+start month, the best available attribution for usage without stage timestamps.
+
+The Manual implementation score is a separate, evidence-based quality gate,
+not the coding agent's self-rating. It awards up to 100 points: ticket
+requirement coverage and correctness (25), language-aware syntax validation
+(15), static quality (10), scope and safety (10), implementation robustness
+(20), independent regression review (10), and security assessment (10). The
+independent reviewer considers whether each ticket requirement is implemented
+correctly based on visible code evidence, in addition to checking static
+quality, scope/safety, robustness, regression risk, and security across the
+changed languages. Python changes also receive built-in AST quality/security
+checks.
+
+The robustness review assesses implementation logic (8 points), edge-case
+handling (6), and integration quality (6). Each area receives its full
+allocation when strong, half when partial, and zero when weak. Scope/safety
+assesses whether the change stays within the approved ticket and avoids
+unsupported destructive behavior, data loss, access-control weakening, or
+unsafe operational side effects. No findings earns 10 points, minor findings
+earn 8, major findings earn 5 and require human review, and critical findings
+earn zero and block review skipping. This replaces the previous automated-test
+category; scoring no longer depends on a repository-specific test command.
+Validation still runs separately when the user accepts the implementation.
+
+Syntax validation uses safe, non-executing parsers/checkers when available:
+Python, JavaScript/JSX, TypeScript/TSX, Java, Go, Rust, Ruby, PHP, shell,
+JSON, and TOML. Several checkers require their corresponding toolchain (for
+example Node.js plus the repository's TypeScript package, a JDK, Go's `gofmt`,
+Rust's `rustfmt`, Ruby, PHP, or Bash). If a changed source file has no compatible
+checker or a required tool is unavailable, the syntax category earns zero and
+the evaluation cannot skip human code review. Documentation-only changes do
+not require a source syntax checker. Other source languages are reported as
+unsupported rather than passed.
+
+The score always uses the fixed 100-point scale: checks that cannot run or
+return valid evidence earn zero and are never removed from the denominator. The
+UI separately shows how much check weight produced evidence. Security checks
+are evidence-based heuristics, not a full security audit. Static checks run in
+a temporary Git worktree and do not run project build scripts or execute the
+changed application code. Skipping code review requires complete evidence for
+all six categories, a score of at least 85, and no critical failures. A syntax
+failure or critical security finding blocks skipping code review regardless of
+score.
 
 ### Outbound run notifications
 

@@ -89,9 +89,14 @@ DEFAULT_WIQL = (
 
 
 class ADOAction(Action):
-    command: Literal["get_ticket", "add_comment", "update_status", "assign_to_self"] = Field(
-        description="The Azure DevOps command to execute."
-    )
+    command: Literal[
+        "get_ticket",
+        "get_comments",
+        "add_comment",
+        "update_status",
+        "assign_to_self",
+        "assign_to_user",
+    ] = Field(description="The Azure DevOps command to execute.")
     jql_filter: str = Field(
         default="",
         description=(
@@ -112,6 +117,7 @@ class ADOAction(Action):
         default="",
         description="Target state name for update_status (e.g. 'Active', 'Closed').",
     )
+    assignee: str = Field(default="", description="Target user for assign_to_user.")
 
 
 class ADOObservation(Observation):
@@ -140,16 +146,26 @@ class ADOExecutor(ToolExecutor[ADOAction, ADOObservation]):
         # Explicit values come from the onboarded application's config (see
         # jira_bot.PipelineConfig); any left as None fall back to the process
         # environment so the standalone ADOTool registration keeps working.
-        self._org_url: str = (org_url if org_url is not None else os.getenv("ADO_ORG_URL", "")).rstrip("/")
-        self._project: str = project if project is not None else os.getenv("ADO_PROJECT", "")
+        self._org_url: str = (
+            org_url if org_url is not None else os.getenv("ADO_ORG_URL", "")
+        ).rstrip("/")
+        self._project: str = (
+            project if project is not None else os.getenv("ADO_PROJECT", "")
+        )
         self._pat: str = pat if pat is not None else os.getenv("ADO_PAT", "")
-        self._assignee: str = assignee if assignee is not None else os.getenv("ADO_ASSIGNEE", "")
+        self._assignee: str = (
+            assignee if assignee is not None else os.getenv("ADO_ASSIGNEE", "")
+        )
         self._me: dict | None = None
         self._ensure_settings()
         logger.info(f"Connecting to Azure DevOps at {self._org_url}/{self._project}")
 
     def _ensure_settings(self):
-        values = {"ADO_ORG_URL": self._org_url, "ADO_PROJECT": self._project, "ADO_PAT": self._pat}
+        values = {
+            "ADO_ORG_URL": self._org_url,
+            "ADO_PROJECT": self._project,
+            "ADO_PAT": self._pat,
+        }
         missing = [k for k in ENV_VARS if not values[k]]
         if missing:
             raise RuntimeError(
@@ -164,17 +180,19 @@ class ADOExecutor(ToolExecutor[ADOAction, ADOObservation]):
         s.headers.update({"Content-Type": "application/json-patch+json"})
         return s
 
-    def __call__(
-        self, action: ADOAction, conversation=None
-    ) -> ADOObservation:
+    def __call__(self, action: ADOAction, conversation=None) -> ADOObservation:
         if action.command == "get_ticket":
             return self._get_ticket(action)
+        if action.command == "get_comments":
+            return self._get_comments(action)
         if action.command == "add_comment":
             return self._add_comment(action)
         if action.command == "update_status":
             return self._update_status(action)
         if action.command == "assign_to_self":
             return self._assign_to_self(action)
+        if action.command == "assign_to_user":
+            return self._assign_to_user(action)
         return ADOObservation.from_text(
             text=f"Unknown command: {action.command}",
             is_error=True,
@@ -240,11 +258,19 @@ class ADOExecutor(ToolExecutor[ADOAction, ADOObservation]):
 
         fields = item.get("fields", {})
         desc = _html_to_text(fields.get("System.Description", "") or "")
+        assigned_to = fields.get("System.AssignedTo")
+        if isinstance(assigned_to, dict):
+            assignee = (
+                assigned_to.get("displayName") or assigned_to.get("uniqueName") or ""
+            )
+        else:
+            assignee = str(assigned_to or "")
         return ADOObservation.from_text(
             text=(
                 f"Key: {item['id']}\n"
                 f"Summary: {fields.get('System.Title', '')}\n"
                 f"Status: {fields.get('System.State', '')}\n"
+                f"Assignee: {assignee or 'Unassigned'}\n"
                 f"Priority: {fields.get('Microsoft.VSTS.Common.Priority', '')}\n"
                 f"Description: {desc[:2000]}"
             ),
@@ -280,6 +306,42 @@ class ADOExecutor(ToolExecutor[ADOAction, ADOObservation]):
                 command=action.command,
             )
 
+    def _get_comments(self, action: ADOAction) -> ADOObservation:
+        if not action.ticket_key:
+            return ADOObservation.from_text(
+                text="get_comments requires a ticket_key.",
+                is_error=True,
+                command=action.command,
+            )
+        session = self._session()
+        try:
+            response = session.get(
+                f"{self._org_url}/{self._project}/_apis/wit/workItems/"
+                f"{action.ticket_key}/comments",
+                params={"api-version": "7.1-preview.3"},
+                headers={"Content-Type": "application/json"},
+            )
+            response.raise_for_status()
+            comments = response.json().get("comments", [])
+            text = "\n".join(
+                str(comment.get("text", ""))
+                for comment in comments
+                if isinstance(comment, dict)
+            )
+            return ADOObservation.from_text(
+                text=text,
+                command=action.command,
+                result=action.ticket_key,
+            )
+        except requests.RequestException as exc:
+            return ADOObservation.from_text(
+                text=f"Failed to read comments from {action.ticket_key}: {exc}",
+                is_error=True,
+                command=action.command,
+            )
+        finally:
+            session.close()
+
     def _update_status(self, action: ADOAction) -> ADOObservation:
         if not action.ticket_key or not action.target_status:
             return ADOObservation.from_text(
@@ -289,6 +351,22 @@ class ADOExecutor(ToolExecutor[ADOAction, ADOObservation]):
             )
         s = self._session()
         try:
+            current = s.get(
+                self._work_item_url(action.ticket_key),
+                params={"api-version": "7.1", "fields": "System.State"},
+            )
+            current.raise_for_status()
+            current_status = str(
+                current.json().get("fields", {}).get("System.State", "")
+            )
+            if current_status.casefold() == action.target_status.strip().casefold():
+                return ADOObservation.from_text(
+                    text=(
+                        f"Status: {current_status}\nOperation: already_in_target_status"
+                    ),
+                    command=action.command,
+                    result=current_status,
+                )
             resp = s.patch(
                 self._work_item_url(action.ticket_key),
                 params={"api-version": "7.1"},
@@ -309,9 +387,12 @@ class ADOExecutor(ToolExecutor[ADOAction, ADOObservation]):
                     is_error=True,
                     command=action.command,
                 )
+            fields = resp.json().get("fields", {})
+            resulting_status = str(fields.get("System.State", action.target_status))
             return ADOObservation.from_text(
-                text=f"{action.ticket_key} transitioned to '{action.target_status}'.",
+                text=(f"Status: {resulting_status}\nOperation: transitioned"),
                 command=action.command,
+                result=resulting_status,
             )
         except requests.RequestException as e:
             return ADOObservation.from_text(
@@ -353,18 +434,67 @@ class ADOExecutor(ToolExecutor[ADOAction, ADOObservation]):
         except requests.RequestException:
             identity = self._assignee
             if not identity:
+                try:
+                    current_response = s.get(
+                        self._work_item_url(action.ticket_key),
+                        params={
+                            "api-version": "7.1",
+                            "fields": "System.AssignedTo",
+                        },
+                    )
+                    current_response.raise_for_status()
+                    current = (
+                        current_response.json()
+                        .get("fields", {})
+                        .get("System.AssignedTo")
+                    )
+                    actual = (
+                        current.get("displayName") or current.get("uniqueName")
+                        if isinstance(current, dict)
+                        else str(current or "Unassigned")
+                    )
+                except requests.RequestException as e:
+                    return ADOObservation.from_text(
+                        text=f"Failed to read assignee for {action.ticket_key}: {e}",
+                        is_error=True,
+                        command=action.command,
+                    )
                 return ADOObservation.from_text(
                     text=(
-                        f"Skipped assigning {action.ticket_key}: PAT lacks Identity/Profile "
-                        "scope to look up the current user, and ADO_ASSIGNEE isn't set. "
-                        "Set ADO_ASSIGNEE=<email> in .env to assign directly, or widen the "
-                        "PAT's scope."
+                        f"Assignee: {actual}\n"
+                        "Operation: skipped_identity_lookup_unavailable"
                     ),
                     is_error=False,
                     command=action.command,
+                    result=actual,
                 )
 
         try:
+            current_response = s.get(
+                self._work_item_url(action.ticket_key),
+                params={"api-version": "7.1", "fields": "System.AssignedTo"},
+            )
+            current_response.raise_for_status()
+            current = current_response.json().get("fields", {}).get("System.AssignedTo")
+            current_values = (
+                {
+                    str(current.get(key, "")).strip().casefold()
+                    for key in ("displayName", "uniqueName", "id")
+                }
+                if isinstance(current, dict)
+                else {str(current or "").strip().casefold()}
+            )
+            if identity.strip().casefold() in current_values:
+                actual = (
+                    current.get("displayName") or current.get("uniqueName") or identity
+                    if isinstance(current, dict)
+                    else str(current or identity)
+                )
+                return ADOObservation.from_text(
+                    text=f"Assignee: {actual}\nOperation: already_assigned",
+                    command=action.command,
+                    result=actual,
+                )
             resp = s.patch(
                 self._work_item_url(action.ticket_key),
                 params={"api-version": "7.1"},
@@ -378,8 +508,74 @@ class ADOExecutor(ToolExecutor[ADOAction, ADOObservation]):
             )
             resp.raise_for_status()
             return ADOObservation.from_text(
-                text=f"{action.ticket_key} assigned to {display_name or identity}.",
+                text=(f"Assignee: {display_name or identity}\nOperation: assigned"),
                 command=action.command,
+                result=display_name or identity,
+            )
+        except requests.RequestException as e:
+            return ADOObservation.from_text(
+                text=f"Failed to assign {action.ticket_key}: {e}",
+                is_error=True,
+                command=action.command,
+            )
+
+    def _assign_to_user(self, action: ADOAction) -> ADOObservation:
+        if not action.ticket_key or not action.assignee.strip():
+            return ADOObservation.from_text(
+                text="assign_to_user requires ticket_key and assignee.",
+                is_error=True,
+                command=action.command,
+            )
+        s = self._session()
+        try:
+            work_item = s.get(
+                self._work_item_url(action.ticket_key),
+                params={"api-version": "7.1", "fields": "System.AssignedTo"},
+            )
+            work_item.raise_for_status()
+            current = work_item.json().get("fields", {}).get("System.AssignedTo")
+            current_values = (
+                {
+                    str(current.get(key, "")).strip().casefold()
+                    for key in ("displayName", "uniqueName", "id")
+                }
+                if isinstance(current, dict)
+                else {str(current or "").strip().casefold()}
+            )
+            target = action.assignee.strip()
+            if target.casefold() in current_values:
+                actual = (
+                    current.get("displayName") or current.get("uniqueName") or target
+                    if isinstance(current, dict)
+                    else str(current or target)
+                )
+                return ADOObservation.from_text(
+                    text=(f"Assignee: {actual}\nOperation: already_assigned"),
+                    command=action.command,
+                    result=actual,
+                )
+            response = s.patch(
+                self._work_item_url(action.ticket_key),
+                params={"api-version": "7.1"},
+                json=[
+                    {
+                        "op": "add",
+                        "path": "/fields/System.AssignedTo",
+                        "value": target,
+                    }
+                ],
+            )
+            response.raise_for_status()
+            assigned = response.json().get("fields", {}).get("System.AssignedTo")
+            actual = (
+                assigned.get("displayName") or assigned.get("uniqueName") or target
+                if isinstance(assigned, dict)
+                else str(assigned or target)
+            )
+            return ADOObservation.from_text(
+                text=f"Assignee: {actual}\nOperation: assigned",
+                command=action.command,
+                result=actual,
             )
         except requests.RequestException as e:
             return ADOObservation.from_text(
@@ -394,13 +590,15 @@ class ADOExecutor(ToolExecutor[ADOAction, ADOObservation]):
 
 _ADO_DESCRIPTION = """Azure DevOps Boards integration tool for interacting with work items.
 
-Supports four commands:
+Supports five commands:
 1. get_ticket — Fetch a work item by ID (ticket_key), or the next match for a WIQL
    query (jql_filter, named for parity with the Jira tool) when no ID is given.
    Returns id, title, description, state, and priority.
 2. add_comment — Post a comment to a work item.
 3. update_status — Set a work item's System.State field (e.g. 'Active', 'Closed').
 4. assign_to_self — Assign a work item to the authenticated (PAT owner) account.
+5. assign_to_user — Assign a work item to the specified identity, skipping it
+   when the work item is already assigned to that identity.
 
 Authentication is via environment variables: ADO_ORG_URL, ADO_PROJECT, ADO_PAT.
 """

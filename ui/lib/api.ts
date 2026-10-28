@@ -1,7 +1,7 @@
 // Thin client for the FastAPI backend (proxied through Next's /api/:path* rewrite
 // in next.config.ts, so these are always same-origin relative requests).
 
-export type StepState = 'pending' | 'in-progress' | 'success' | 'failed' | 'error' | 'human';
+export type StepState = 'pending' | 'in-progress' | 'success' | 'failed' | 'error' | 'human' | 'cancelled';
 
 export type StepInfo = {
   key: string;
@@ -9,7 +9,120 @@ export type StepInfo = {
   state: StepState;
 };
 
-export type RunStatus = 'in-progress' | 'awaiting-approval' | 'success' | 'failed' | 'error' | 'human';
+export type RunStatus = 'in-progress' | 'cancelling' | 'awaiting-approval' | 'awaiting-human' | 'success' | 'failed' | 'error' | 'human' | 'cancelled';
+export type WorkflowMode = 'automatic' | 'manual';
+export type ManualTaskField = {
+  name: string;
+  label: string;
+  required: boolean;
+  multiline?: boolean;
+  options?: string[];
+};
+export type ManualProposedFile = {
+  path: string;
+  content: string;
+  deleted: boolean;
+};
+export type ManualVerificationCheck = {
+  name: string;
+  status: 'passed' | 'failed' | 'not_run' | 'error' | string;
+  summary: string;
+  output: string;
+};
+export type ManualVerificationReport = {
+  decision: 'pass' | 'fail' | string;
+  reviewer_verdict: 'PASS' | 'FAIL' | 'INCOMPLETE' | string;
+  decision_reason: string;
+  summary: string;
+  branch: string;
+  changed_files: string;
+  test_results: string;
+  implementation_test_output: string;
+  checks: ManualVerificationCheck[];
+  review_report: string;
+};
+export type ManualPullRequest = {
+  url: string;
+  number: string;
+  source_branch: string;
+  target_branch: string;
+  creation_status: string;
+  state: string;
+  evidence: string;
+};
+export type ManualTicketUpdate = {
+  ticket_key: string;
+  status: string;
+  operation: string;
+  comment_status: string;
+  comment: string;
+  pr_url: string;
+  evidence: string;
+};
+export type ImplementationEvaluationCheck = {
+  key: string;
+  name: string;
+  weight: number;
+  score: number;
+  status: 'passed' | 'warning' | 'failed' | 'not_run' | 'error';
+  summary: string;
+  output: string;
+  critical: boolean;
+};
+export type ImplementationEvaluation = {
+  version: number;
+  score: number;
+  scored_weight: number;
+  threshold: number;
+  checks: ImplementationEvaluationCheck[];
+  critical_failures: string[];
+  summary: string;
+};
+export type ManualTask = {
+  stage_key: string;
+  label: string;
+  instructions: string;
+  fields: ManualTaskField[];
+  initial_values: Record<string, string>;
+  questions: string[];
+  analysis: string;
+  attempts: Array<Record<string, unknown>>;
+  context: Record<string, Record<string, string>>;
+  phase: string;
+  branch: string;
+  base_sha: string;
+  proposed_files: ManualProposedFile[];
+  proposed_patch: string;
+  changed_files: string[];
+  agent_summary: string;
+  implementation_score: number | null;
+  implementation_evaluation: ImplementationEvaluation | null;
+  test_results: string;
+  test_output: string;
+  feedback: string;
+  error: string;
+  report: ManualVerificationReport | null;
+  pr: ManualPullRequest | null;
+  ticket_update: ManualTicketUpdate | null;
+};
+
+export function manualTaskNeedsHumanAction(task: ManualTask | null | undefined): boolean {
+  if (!task) return false;
+
+  switch (task.stage_key) {
+    case 'agent':
+      return ['review', 'validation_failed', 'failed'].includes(task.phase);
+    case 'verify':
+      return ['review', 'failed'].includes(task.phase);
+    case 'pr':
+    case 'jira':
+      return task.phase === 'failed';
+    default:
+      return !['generating', 'validating', 'applying', 'verifying', 'creating', 'updating'].includes(
+        task.phase,
+      );
+  }
+}
 
 // Set when the run's application requires sign-off before a PR opens.
 export type RunApproval = {
@@ -40,6 +153,8 @@ export type RunRecord = {
   steps: StepInfo[];
   logs: Record<string, string[]>;
   approval: RunApproval | null;
+  workflow_mode: WorkflowMode | 'hybrid'; // Read-only compatibility for persisted older runs.
+  manual_task: ManualTask | null;
 };
 
 export type RunStats = {
@@ -100,11 +215,38 @@ export function getRunStatus(runId: string): Promise<RunRecord> {
   return request<RunRecord>(`/api/run-status/${runId}`);
 }
 
-export function runTicket(ticketKey: string, appId?: string): Promise<{ run_id: string; app_id: string }> {
+export function cancelRun(runId: string): Promise<RunRecord> {
+  return request<RunRecord>(`/api/runs/${encodeURIComponent(runId)}/cancel`, {
+    method: 'POST',
+  });
+}
+
+export function runTicket(ticketKey: string, appId?: string, mode: WorkflowMode = 'automatic'): Promise<{ run_id: string; app_id: string }> {
   return request<{ run_id: string; app_id: string }>('/api/run-ticket', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ticket_key: ticketKey, app_id: appId }),
+    body: JSON.stringify({ ticket_key: ticketKey, app_id: appId, mode }),
+  });
+}
+
+export function completeManualStage(
+  runId: string,
+  submission: {
+    action?: 'submit' | 'request_changes' | 'apply_edits' | 'accept_implementation'
+      | 'skip_high_confidence_review'
+      | 'accept_verification' | 'request_verification_fixes'
+      | 'flag_verification_concern' | 'submit_manual_verification'
+      | 'retry_verification' | 'retry_pr_creation'
+      | 'retry_ticket_update';
+    result?: Record<string, string>;
+    files?: Record<string, string | null>;
+    feedback?: string;
+  },
+): Promise<RunRecord> {
+  return request<RunRecord>(`/api/runs/${encodeURIComponent(runId)}/manual-stage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(submission),
   });
 }
 
@@ -244,11 +386,15 @@ export type IntegrationConfig = {
   ADO_ORG_URL: string;
   ADO_PROJECT: string;
   ADO_ASSIGNEE: string;
+  TARGET_ASSIGNEE: string;
   ADO_WIQL: string;
   TARGET_REPO: string;
   TARGET_BRANCH: string;
   AZURE_OPENAI_ENDPOINT: string;
   AZURE_OPENAI_DEPLOYMENT: string;
+  AZURE_OPENAI_CLARITY_GATE_DEPLOYMENT: string;
+  AZURE_OPENAI_CODING_DEPLOYMENT: string;
+  AZURE_OPENAI_VERIFICATION_DEPLOYMENT: string;
   STATUS_DONE: string;
   STATUS_IN_PROGRESS: string;
   STATUS_FAILED: string;

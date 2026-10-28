@@ -5,7 +5,7 @@ import Link from 'next/link';
 import Nav from '@/components/Nav';
 import PageHeader from '@/components/PageHeader';
 import StatusBadge from '@/components/StatusBadge';
-import { getRuns, runTicket, formatDuration, formatTime, type RunRecord } from '@/lib/api';
+import { getRuns, runTicket, formatDuration, formatTime, type RunRecord, type WorkflowMode } from '@/lib/api';
 import { useActiveApp } from '@/components/AppContext';
 
 const STORAGE_KEY = 'bulk-request-ticket-ids';
@@ -93,8 +93,8 @@ function TicketCard({
           {running ? 'Running…' : run ? 'Re-run' : 'Run'}
         </button>
         {run && (
-          <Link href={`/logs?run=${run.id}`} style={{ fontSize: 12.5, color: 'var(--color-accent-purple)', textDecoration: 'none' }}>
-            View trace →
+          <Link href={run.status === 'awaiting-human' && run.workflow_mode === 'manual' ? `/run?manual_run=${encodeURIComponent(run.id)}` : `/logs?run=${run.id}`} style={{ fontSize: 12.5, color: 'var(--color-accent-purple)', textDecoration: 'none' }}>
+            {run.status === 'awaiting-human' && run.workflow_mode === 'manual' ? 'Continue manual task →' : 'View trace →'}
           </Link>
         )}
         <div style={{ flex: 1 }} />
@@ -123,6 +123,7 @@ export default function BulkRequestPage() {
   const [error, setError] = useState<string | null>(null);
   const [runningIds, setRunningIds] = useState<Set<string>>(new Set());
   const [bulkRunning, setBulkRunning] = useState(false);
+  const [workflowMode, setWorkflowMode] = useState<WorkflowMode>('automatic');
   const { activeApp, activeAppId, me, can } = useActiveApp();
   const canRun = can('runner');
 
@@ -171,7 +172,7 @@ export default function BulkRequestPage() {
   const runOne = async (id: string) => {
     setRunningIds((s) => new Set(s).add(id));
     try {
-      await runTicket(id, activeAppId);
+      await runTicket(id, activeAppId, workflowMode);
       await refresh();
     } catch (e: any) {
       setError(e.message);
@@ -188,7 +189,7 @@ export default function BulkRequestPage() {
       // Fire every ticket in parallel — none of these await each other, so
       // the backend receives and starts all of them at once, same as running
       // them by hand from separate tabs simultaneously.
-      await Promise.allSettled(ticketIds.map((id) => runTicket(id, activeAppId)));
+      await Promise.allSettled(ticketIds.map((id) => runTicket(id, activeAppId, workflowMode)));
       await refresh();
     } finally {
       setRunningIds(new Set());
@@ -202,7 +203,7 @@ export default function BulkRequestPage() {
       const run = latestByTicket.get(id);
       if (!run) notRun++;
       else if (run.status === 'success') success++;
-      else if (run.status === 'in-progress' || run.status === 'awaiting-approval') running++;
+      else if (run.status === 'in-progress' || run.status === 'cancelling' || run.status === 'awaiting-approval' || run.status === 'awaiting-human') running++;
       else failed++;
     }
     return { success, failed, running, notRun };
@@ -221,6 +222,17 @@ export default function BulkRequestPage() {
 
         <div className="card-main" style={{ padding: '18px 20px', marginBottom: 20 }}>
           <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+            <select
+              className="input-main"
+              aria-label="Execution mode"
+              value={workflowMode}
+              disabled={bulkRunning}
+              onChange={(e) => setWorkflowMode(e.target.value as WorkflowMode)}
+              style={{ maxWidth: 300 }}
+            >
+              <option value="automatic">Automatic</option>
+              <option value="manual">Manual</option>
+            </select>
             <input
               className="input-main"
               placeholder="Ticket ID(s) — e.g. 674 or 674, 675, 676"

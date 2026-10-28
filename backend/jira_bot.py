@@ -22,6 +22,8 @@ from dotenv import load_dotenv
 from backend import skills_store
 from backend.ado_tool import ADOAction, ADOExecutor
 from backend.jira_tool import JiraAction, JiraExecutor
+from backend.stages.ticket import parse_ticket
+from backend.workflow import get_stage
 
 
 load_dotenv()
@@ -67,11 +69,15 @@ class PipelineConfig:
     ado_project: str = ""
     ado_pat: str = ""
     ado_assignee: str = ""
+    target_assignee: str = ""
     ado_wiql: str = ""  # empty -> ado_tool.DEFAULT_WIQL (tag-based)
     target_repo: str = _DEFAULT_REPO
     target_branch: str = "dev"
     github_token: str = ""
     azure_deployment: str = ""
+    clarity_gate_deployment: str = ""
+    coding_deployment: str = ""
+    verification_deployment: str = ""
     azure_key: str = ""
     azure_url: str = ""
     status_failed: str = ""
@@ -128,11 +134,15 @@ class PipelineConfig:
             ado_project=get("ADO_PROJECT"),
             ado_pat=get("ADO_PAT"),
             ado_assignee=get("ADO_ASSIGNEE"),
+            target_assignee=get("TARGET_ASSIGNEE", get("ADO_ASSIGNEE")),
             ado_wiql=get("ADO_WIQL"),
             target_repo=get("TARGET_REPO", _DEFAULT_REPO),
             target_branch=get("TARGET_BRANCH", "dev"),
             github_token=get("GITHUB_TOKEN"),
             azure_deployment=get("AZURE_OPENAI_DEPLOYMENT"),
+            clarity_gate_deployment=get("AZURE_OPENAI_CLARITY_GATE_DEPLOYMENT"),
+            coding_deployment=get("AZURE_OPENAI_CODING_DEPLOYMENT"),
+            verification_deployment=get("AZURE_OPENAI_VERIFICATION_DEPLOYMENT"),
             azure_key=get("AZURE_OPENAI_API_KEY"),
             azure_url=get("AZURE_OPENAI_ENDPOINT"),
             status_failed=get("STATUS_FAILED", failed),
@@ -163,7 +173,22 @@ class PipelineConfig:
 
     @property
     def azure_model(self) -> str:
-        return f"azure/{self.azure_deployment or 'gpt-4.1-mini'}"
+        return self._azure_model(self.azure_deployment)
+
+    def _azure_model(self, deployment: str) -> str:
+        return f"azure/{deployment or self.azure_deployment or 'gpt-4.1-mini'}"
+
+    @property
+    def clarity_gate_model(self) -> str:
+        return self._azure_model(self.clarity_gate_deployment)
+
+    @property
+    def coding_model(self) -> str:
+        return self._azure_model(self.coding_deployment)
+
+    @property
+    def verification_model(self) -> str:
+        return self._azure_model(self.verification_deployment)
 
     @property
     def ticket_url_base(self) -> str:
@@ -759,6 +784,7 @@ def run_pipeline(
     report_step, report_log = on_step, on_log
 
     def on_step(step: str, state: str, log: Optional[str] = None) -> None:
+        get_stage(step)
         report_step(step, state, redact(log, *secrets))
 
     def log_event(stage: str, message: str, level: str = "info") -> None:
@@ -799,7 +825,6 @@ def run_pipeline(
         on_step("fetch", "failed", msg)
         raise PipelineHalt("failed", msg)
 
-    lines = result.text.strip().split("\n")
     resolved_key = result.result
 
     def post_comment(text: str, step_key: str, state: str) -> None:
@@ -816,22 +841,10 @@ def run_pipeline(
         if obs.is_error:
             on_step(step_key, state, f"[WARN] Status not updated on ticket: {obs.text[:200]}")
 
-    summary = ""
-    description = ""
-    status_name = ""
-    in_desc = False
-    desc_lines: list[str] = []
-    for line in lines:
-        if line.startswith("Summary:"):
-            summary = line.split(":", 1)[1].strip()
-        elif line.startswith("Status:"):
-            status_name = line.split(":", 1)[1].strip()
-        elif line.startswith("Description:"):
-            in_desc = True
-            desc_lines.append(line.split(":", 1)[1].strip())
-        elif in_desc and line.strip() and not any(line.startswith(p) for p in ["Key:", "Summary:", "Status:", "Priority:"]):
-            desc_lines.append(line.strip())
-    description = "\n".join(desc_lines)
+    ticket_details = parse_ticket(result.text)
+    summary = ticket_details.summary
+    description = ticket_details.description
+    status_name = ticket_details.status
     if status_name:
         log_event("fetch", f"Current ticket status: {status_name}")
 
@@ -842,17 +855,13 @@ def run_pipeline(
     # Repo/branch fall back to explicit run_pipeline args, then the app's
     # TARGET_REPO/TARGET_BRANCH. Persona falls back to the app's default
     # persona, then keyword-based selection (skills_store.select_persona).
-    repo_match = re.search(r"(?im)^\s*repo(?:sitory)?\s*:\s*(\S+)\s*$", description)
-    branch_match = re.search(r"(?im)^\s*branch\s*:\s*(\S+)\s*$", description)
-    persona_match = re.search(r"(?im)^\s*persona\s*:\s*(\S+)\s*$", description)
-    if repo_match:
-        target_repo = repo_match.group(1)
-    if branch_match:
-        target_branch = branch_match.group(1)
+    if ticket_details.target_repo:
+        target_repo = ticket_details.target_repo
+    if ticket_details.target_branch:
+        target_branch = ticket_details.target_branch
     target_repo = target_repo or cfg.target_repo
     target_branch = target_branch or cfg.target_branch
-    # Strip those lines from the working description so they don't confuse the gate/agent prompts.
-    description = re.sub(r"(?im)^\s*(repo(?:sitory)?|branch|persona)\s*:\s*\S+\s*$", "", description).strip()
+    requested_persona = ticket_details.persona
 
     pipeline_stage = "code"
     eligible_personas = {
@@ -863,15 +872,15 @@ def run_pipeline(
         )
         if "error" not in skill
     }
-    if persona_match and persona_match.group(1) not in eligible_personas:
+    if requested_persona and requested_persona not in eligible_personas:
         log_event(
             "fetch",
-            f"Requested persona {persona_match.group(1)!r} is not enabled for "
+            f"Requested persona {requested_persona!r} is not enabled for "
             f"pipeline stage {pipeline_stage}; selecting a compatible persona.",
             "warning",
         )
-    if persona_match and persona_match.group(1) in eligible_personas:
-        persona = persona_match.group(1)
+    if requested_persona and requested_persona in eligible_personas:
+        persona = requested_persona
     elif cfg.default_persona in eligible_personas:
         persona = cfg.default_persona
     else:
@@ -896,23 +905,24 @@ def run_pipeline(
 
     on_step("fetch", "success", f"{resolved_key}: {summary} (persona: {persona})")
 
-    # ── STEP 2: ASSIGN — hand the ticket to the bot account ────────
-    on_step("assign", "in-progress", "Assigning ticket to bot")
-
-    assign_result = ticket(TicketAction(command="assign_to_self", ticket_key=resolved_key))
+    # ── STEP 2: ASSIGN — use the configured target, or the integration user ─
+    on_step("assign", "in-progress", "Checking the current ticket assignee")
+    if cfg.target_assignee:
+        assign_result = ticket(
+            TicketAction(
+                command="assign_to_user",
+                ticket_key=resolved_key,
+                assignee=cfg.target_assignee,
+            )
+        )
+    else:
+        assign_result = ticket(
+            TicketAction(command="assign_to_self", ticket_key=resolved_key)
+        )
     if assign_result.is_error:
         on_step("assign", "failed", assign_result.text)
-    else:
-        on_step("assign", "success", assign_result.text)
-
-    # ── STEP 3: IN PROGRESS — move ticket out of the backlog ──────
-    on_step("in_progress", "in-progress", "Moving ticket to in-progress")
-
-    ip_result = ticket(TicketAction(command="update_status", ticket_key=resolved_key, target_status=cfg.status_in_progress))
-    if ip_result.is_error:
-        on_step("in_progress", "failed", ip_result.text)
-    else:
-        on_step("in_progress", "success", ip_result.text)
+        raise PipelineHalt("failed", assign_result.text)
+    on_step("assign", "success", assign_result.text)
 
     # ── STEP 4: CLARITY GATE ───────────────────────────────────────
     on_step("gate", "in-progress", "Checking ticket detail")
@@ -949,7 +959,7 @@ def run_pipeline(
     from openhands.sdk.llm import Message, TextContent
 
     gate_llm = LLM(
-        model=cfg.azure_model,
+        model=cfg.clarity_gate_model,
         api_key=SecretStr(cfg.azure_key),
         base_url=cfg.azure_url,
     )
@@ -1003,6 +1013,20 @@ def run_pipeline(
         raise PipelineHalt("human", gate_text.strip())
 
     on_step("gate", "success", gate_text.strip()[:200])
+
+    # Mark work as active only after the ticket passes the clarity gate.
+    on_step("in_progress", "in-progress", "Checking ticket status before implementation")
+    ip_result = ticket(
+        TicketAction(
+            command="update_status",
+            ticket_key=resolved_key,
+            target_status=cfg.status_in_progress,
+        )
+    )
+    if ip_result.is_error:
+        on_step("in_progress", "failed", ip_result.text)
+        raise PipelineHalt("failed", ip_result.text)
+    on_step("in_progress", "success", ip_result.text)
 
     # ── STEP 3: AGENT RUN ─────────────────────────────────────────
     on_step("agent", "in-progress", "Starting coding agent")
@@ -1106,7 +1130,7 @@ def run_pipeline(
     from openhands.tools.terminal import TerminalTool
 
     agent_llm = LLM(
-        model=cfg.azure_model,
+        model=cfg.coding_model,
         api_key=SecretStr(cfg.azure_key),
         base_url=cfg.azure_url,
     )
@@ -1364,8 +1388,13 @@ def run_pipeline(
     )
     log_event("verify", f"Verification persona: {verify_persona}")
     try:
+        verification_llm = LLM(
+            model=cfg.verification_model,
+            api_key=SecretStr(cfg.azure_key),
+            base_url=cfg.azure_url,
+        )
         verification_response = _run_verification_agent(
-            agent_llm,
+            verification_llm,
             repo_dir,
             verification_prompt,
             on_step,

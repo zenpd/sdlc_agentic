@@ -127,6 +127,7 @@ function AppCard({
 const EMPTY_FORM = {
   name: '', team_id: '', description: '',
   TICKET_PROVIDER: 'ado' as 'jira' | 'ado',
+  TARGET_ASSIGNEE: '',
   JIRA_BASE_URL: '', JIRA_USER_EMAIL: '', JIRA_API_TOKEN: '',
   ADO_ORG_URL: '', ADO_PROJECT: '', ADO_PAT: '',
   DEFAULT_PERSONA: '', BRANCH_PREFIX: '', GATE_MIN_WORDS: '',
@@ -163,7 +164,7 @@ function OnboardModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
       ? ['ADO_ORG_URL', 'ADO_PROJECT', 'ADO_PAT'] as const
       : ['JIRA_BASE_URL', 'JIRA_USER_EMAIL', 'JIRA_API_TOKEN'] as const;
     const config: AppConfigUpdate = { TICKET_PROVIDER: form.TICKET_PROVIDER };
-    for (const k of [...providerKeys, 'DEFAULT_PERSONA', 'BRANCH_PREFIX', 'GATE_MIN_WORDS', 'REQUIRE_PR_APPROVAL', 'PROTECTED_PATHS', 'VERIFY_MODE', 'TEST_COMMAND'] as const) {
+    for (const k of [...providerKeys, 'TARGET_ASSIGNEE', 'DEFAULT_PERSONA', 'BRANCH_PREFIX', 'GATE_MIN_WORDS', 'REQUIRE_PR_APPROVAL', 'PROTECTED_PATHS', 'VERIFY_MODE', 'TEST_COMMAND'] as const) {
       if (form[k].trim()) config[k] = form[k].trim();
     }
     try {
@@ -254,6 +255,16 @@ function OnboardModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
               </div>
             </>
           )}
+          <div>
+            <label className="label-main">Target agent or user</label>
+            <input
+              className="input-main"
+              value={form.TARGET_ASSIGNEE}
+              onChange={set('TARGET_ASSIGNEE')}
+              placeholder={form.TICKET_PROVIDER === 'ado' ? 'user@company.com' : 'Jira account ID or email'}
+            />
+            <div className="field-hint">{hint('TARGET_ASSIGNEE')}</div>
+          </div>
 
           <div className="form-section-label">Defaults for this application</div>
           <div>
