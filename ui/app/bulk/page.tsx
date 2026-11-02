@@ -3,8 +3,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import Nav from '@/components/Nav';
+import PageHeader from '@/components/PageHeader';
 import StatusBadge from '@/components/StatusBadge';
-import { getRuns, runTicket, formatDuration, formatTime, type RunRecord } from '@/lib/api';
+import { getRuns, runTicket, formatDuration, formatTime, type RunRecord, type WorkflowMode } from '@/lib/api';
+import { useActiveApp } from '@/components/AppContext';
 
 const STORAGE_KEY = 'bulk-request-ticket-ids';
 
@@ -43,8 +45,8 @@ function saveStoredIds(ids: string[]) {
 }
 
 function TicketCard({
-  id, run, onRun, onRemove, running,
-}: { id: string; run: RunRecord | null; onRun: () => void; onRemove: () => void; running: boolean }) {
+  id, run, onRun, onRemove, running, canRun,
+}: { id: string; run: RunRecord | null; onRun: () => void; onRemove: () => void; running: boolean; canRun: boolean }) {
   const persona = run ? personaOf(run) : null;
   const summary = run ? summaryOf(run) : null;
 
@@ -84,15 +86,15 @@ function TicketCard({
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, paddingTop: 4, borderTop: '1px solid var(--color-border)', marginTop: 2 }}>
         <button
           onClick={onRun}
-          disabled={running}
+          disabled={running || !canRun}
           className="btn-secondary"
-          style={{ padding: '7px 14px', fontSize: 12.5, opacity: running ? 0.5 : 1 }}
+          style={{ padding: '7px 14px', fontSize: 12.5, opacity: running || !canRun ? 0.5 : 1 }}
         >
           {running ? 'Running…' : run ? 'Re-run' : 'Run'}
         </button>
         {run && (
-          <Link href={`/logs?run=${run.id}`} style={{ fontSize: 12.5, color: 'var(--color-accent-purple)', textDecoration: 'none' }}>
-            View trace →
+          <Link href={run.status === 'awaiting-human' && run.workflow_mode === 'manual' ? `/run?manual_run=${encodeURIComponent(run.id)}` : `/logs?run=${run.id}`} style={{ fontSize: 12.5, color: 'var(--color-accent-purple)', textDecoration: 'none' }}>
+            {run.status === 'awaiting-human' && run.workflow_mode === 'manual' ? 'Continue manual task →' : 'View trace →'}
           </Link>
         )}
         <div style={{ flex: 1 }} />
@@ -121,6 +123,9 @@ export default function BulkRequestPage() {
   const [error, setError] = useState<string | null>(null);
   const [runningIds, setRunningIds] = useState<Set<string>>(new Set());
   const [bulkRunning, setBulkRunning] = useState(false);
+  const [workflowMode, setWorkflowMode] = useState<WorkflowMode>('automatic');
+  const { activeApp, activeAppId, me, can } = useActiveApp();
+  const canRun = can('runner');
 
   useEffect(() => {
     setTicketIds(loadStoredIds());
@@ -132,12 +137,12 @@ export default function BulkRequestPage() {
 
   const refresh = useCallback(async () => {
     try {
-      setRuns(await getRuns());
+      setRuns(await getRuns(activeAppId));
       setError(null);
     } catch (e: any) {
       setError(e.message);
     }
-  }, []);
+  }, [activeAppId]);
 
   useEffect(() => {
     refresh().finally(() => setLoading(false));
@@ -167,7 +172,7 @@ export default function BulkRequestPage() {
   const runOne = async (id: string) => {
     setRunningIds((s) => new Set(s).add(id));
     try {
-      await runTicket(id);
+      await runTicket(id, activeAppId, workflowMode);
       await refresh();
     } catch (e: any) {
       setError(e.message);
@@ -184,7 +189,7 @@ export default function BulkRequestPage() {
       // Fire every ticket in parallel — none of these await each other, so
       // the backend receives and starts all of them at once, same as running
       // them by hand from separate tabs simultaneously.
-      await Promise.allSettled(ticketIds.map((id) => runTicket(id)));
+      await Promise.allSettled(ticketIds.map((id) => runTicket(id, activeAppId, workflowMode)));
       await refresh();
     } finally {
       setRunningIds(new Set());
@@ -198,7 +203,7 @@ export default function BulkRequestPage() {
       const run = latestByTicket.get(id);
       if (!run) notRun++;
       else if (run.status === 'success') success++;
-      else if (run.status === 'in-progress') running++;
+      else if (run.status === 'in-progress' || run.status === 'cancelling' || run.status === 'awaiting-approval' || run.status === 'awaiting-human') running++;
       else failed++;
     }
     return { success, failed, running, notRun };
@@ -206,25 +211,28 @@ export default function BulkRequestPage() {
 
   return (
     <div className="bg-bg min-h-screen">
-      <div className="bg-animation">
-        <div className="bg-grid" />
-        <div className="bg-orb bg-orb-1" />
-        <div className="bg-orb bg-orb-2" />
-        <div className="bg-orb bg-orb-3" />
-      </div>
-
       <Nav />
 
-      <div className="content" style={{ maxWidth: 1000, margin: '0 auto', padding: '40px 32px 48px' }}>
-        <div className="card-main" style={{ padding: '20px 24px', marginBottom: 24 }}>
-          <h1 style={{ fontSize: 24, fontWeight: 800, letterSpacing: '-0.01em' }}>Bulk Request</h1>
-          <p style={{ fontSize: 13, color: 'var(--color-text-secondary)', marginTop: 4 }}>
-            Add any number of ticket IDs and run them all at once, in parallel — not one at a time.
-          </p>
-        </div>
+      <div className="content">
+        <PageHeader
+          eyebrow="Parallel execution"
+          title="Bulk Request"
+          description={`Add any number of ticket IDs and run them all at once, in parallel — not one at a time. Runs use ${activeApp?.name ?? 'the active application'}'s settings.`}
+        />
 
-        <div className="card-main" style={{ padding: '16px 20px', marginBottom: 24 }}>
+        <div className="card-main" style={{ padding: '18px 20px', marginBottom: 20 }}>
           <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+            <select
+              className="input-main"
+              aria-label="Execution mode"
+              value={workflowMode}
+              disabled={bulkRunning}
+              onChange={(e) => setWorkflowMode(e.target.value as WorkflowMode)}
+              style={{ maxWidth: 300 }}
+            >
+              <option value="automatic">Automatic</option>
+              <option value="manual">Manual</option>
+            </select>
             <input
               className="input-main"
               placeholder="Ticket ID(s) — e.g. 674 or 674, 675, 676"
@@ -239,14 +247,15 @@ export default function BulkRequestPage() {
             <div style={{ flex: 1 }} />
             <button
               onClick={runAll}
-              disabled={bulkRunning || ticketIds.length === 0}
+              disabled={bulkRunning || ticketIds.length === 0 || !canRun}
               className="btn-primary"
-              style={{ padding: '10px 20px', fontSize: 13, opacity: bulkRunning || ticketIds.length === 0 ? 0.5 : 1 }}
+              style={{ padding: '10px 20px', fontSize: 13, opacity: bulkRunning || ticketIds.length === 0 || !canRun ? 0.5 : 1 }}
             >
               {bulkRunning ? 'Running all…' : `Run All (${ticketIds.length})`}
             </button>
           </div>
 
+          {me && !canRun && <div className="locked-note" style={{ marginTop: 14 }}>🔒 Your role is <b>{me.role}</b> — starting runs needs <b>runner</b> or higher. Ask an admin.</div>}
           {ticketIds.length > 0 && (
             <div style={{ display: 'flex', gap: 16, marginTop: 14, paddingTop: 14, borderTop: '1px solid var(--color-border)', fontSize: 12.5, color: 'var(--color-text-secondary)', flexWrap: 'wrap' }}>
               <span>{ticketIds.length} tracked</span>
@@ -258,11 +267,7 @@ export default function BulkRequestPage() {
           )}
         </div>
 
-        {error && (
-          <div style={{ marginBottom: 20, padding: '12px 16px', borderRadius: 10, background: 'rgba(220,38,38,.08)', color: 'var(--color-red)', fontSize: 13 }}>
-            {error}
-          </div>
-        )}
+        {error && <div className="alert error">{error}</div>}
 
         {loading ? (
           <div style={{ color: 'var(--color-text-muted)', fontSize: 14 }}>Loading...</div>
@@ -271,7 +276,7 @@ export default function BulkRequestPage() {
             No tickets added yet — enter one or more ticket IDs above to get started.
           </div>
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: 14 }}>
             {ticketIds.map((id) => (
               <TicketCard
                 key={id}
@@ -280,6 +285,7 @@ export default function BulkRequestPage() {
                 onRun={() => runOne(id)}
                 onRemove={() => removeId(id)}
                 running={runningIds.has(id)}
+                canRun={canRun}
               />
             ))}
           </div>

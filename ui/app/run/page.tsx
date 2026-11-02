@@ -2,11 +2,14 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import Nav from '@/components/Nav';
+import PageHeader from '@/components/PageHeader';
 import StepTracker from '@/components/StepTracker';
 import StatusBadge from '@/components/StatusBadge';
-import AgentActivity from '@/components/AgentActivity';
 import StageProgress from '@/components/StageProgress';
-import { runTicket, getRunStatus, formatDuration, type RunRecord, type StepInfo } from '@/lib/api';
+import { runTicket, cancelRun, getRunStatus, getRuns, describeDuration, formatDuration, withoutAgentTrace, manualTaskNeedsHumanAction, type RunRecord, type StepInfo, type WorkflowMode } from '@/lib/api';
+import { useActiveApp } from '@/components/AppContext';
+import ApprovalPanel from '@/components/ApprovalPanel';
+import ManualStagePanel from '@/components/ManualStagePanel';
 
 const STEPS: StepInfo[] = [
   { key: 'fetch', label: 'Fetching ticket', state: 'pending' },
@@ -14,6 +17,7 @@ const STEPS: StepInfo[] = [
   { key: 'in_progress', label: 'Moving to In Progress', state: 'pending' },
   { key: 'gate', label: 'Clarity gate', state: 'pending' },
   { key: 'agent', label: 'Agent coding & testing', state: 'pending' },
+  { key: 'verify', label: 'Verification review', state: 'pending' },
   { key: 'pr', label: 'Opening PR', state: 'pending' },
   { key: 'jira', label: 'Updating Ticket', state: 'pending' },
 ];
@@ -35,6 +39,38 @@ const CONFETTI_PIECES = [
   { x: 38, color: '#a78bfa', delay: 0.13, size: 8,  dur: 1.05 },
   { x: 64, color: '#a78bfa', delay: 0.01, size: 6,  dur: 1.15 },
 ];
+
+function manualStageLogs(record: RunRecord): Record<string, string[]> {
+  const logs: Record<string, string[]> = {};
+  const context = record.manual_task?.context ?? {};
+  const steps = new Map(record.steps.map((step) => [step.key, step.state]));
+
+  const assignee = context.assign?.actual_assignee;
+  if (assignee) logs.assign = [`Target user: ${assignee}`];
+
+  const status = context.in_progress?.status;
+  if (status) {
+    const operation = context.in_progress?.operation ?? '';
+    logs.in_progress = [
+      operation.toLowerCase().startsWith('already')
+        ? `Already active: ${status}`
+        : `Status updated: ${status}`,
+    ];
+  }
+
+  if (context.gate?.decision === 'pass') {
+    logs.gate = ['Clarity check completed'];
+  }
+
+  for (const key of ['fetch', 'assign', 'in_progress', 'gate', 'agent', 'verify', 'pr', 'jira']) {
+    const state = steps.get(key);
+    if ((state === 'failed' || state === 'error') && record.logs[key]?.length) {
+      logs[key] = [record.logs[key][record.logs[key].length - 1]];
+    }
+  }
+
+  return logs;
+}
 
 function Confetti() {
   return (
@@ -63,9 +99,10 @@ function Confetti() {
 
 export default function RunPage() {
   const [ticketKey, setTicketKey]   = useState('');
+  const [workflowMode, setWorkflowMode] = useState<WorkflowMode>('automatic');
   const [runId, setRunId]           = useState<string | null>(null);
   const [status, setStatus]         = useState<RunRecord['status'] | null>(null);
-  const [stepStates, setStepStates] = useState<Array<'pending' | 'in-progress' | 'success' | 'failed' | 'error' | 'human'>>(
+  const [stepStates, setStepStates] = useState<Array<'pending' | 'in-progress' | 'success' | 'failed' | 'error' | 'human' | 'cancelled'>>(
     STEPS.map(() => 'pending')
   );
   const [logs, setLogs]         = useState<Record<string, string[]>>({});
@@ -74,29 +111,71 @@ export default function RunPage() {
   const [error, setError]       = useState<string | null>(null);
   const [running, setRunning]   = useState(false);
   const [elapsed, setElapsed]   = useState(0);
+  const [record, setRecord]     = useState<RunRecord | null>(null);
+  const { activeApp, activeAppId, me, can } = useActiveApp();
+  const canRun = can('runner');
 
   const intervalRef   = useRef<ReturnType<typeof setInterval> | null>(null);
   const timerRef      = useRef<ReturnType<typeof setInterval> | null>(null);
   const startTimeRef  = useRef<number | null>(null);
+  const pollingRunIdRef = useRef<string | null>(null);
+  const skipManualResumeRef = useRef(false);
 
-  const stopTimer = () => {
+  const stopTimer = useCallback(() => {
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
-  };
+  }, []);
+
+  const clearForNewRun = useCallback(() => {
+    skipManualResumeRef.current = true;
+    if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
+    pollingRunIdRef.current = null;
+    stopTimer();
+    startTimeRef.current = null;
+    setTicketKey('');
+    setWorkflowMode('automatic');
+    setRunId(null);
+    setStatus(null);
+    setStepStates(STEPS.map(() => 'pending'));
+    setLogs({});
+    setPrUrl(null);
+    setDuration(null);
+    setError(null);
+    setRunning(false);
+    setElapsed(0);
+    setRecord(null);
+  }, [stopTimer]);
 
   const startPolling = useCallback((id: string) => {
+    if (intervalRef.current) clearInterval(intervalRef.current);
+    pollingRunIdRef.current = id;
     intervalRef.current = setInterval(async () => {
       try {
         const r = await getRunStatus(id);
+        if (pollingRunIdRef.current !== id) return;
+        setRecord(r);
         setStatus(r.status);
         setStepStates(r.steps.map((s) => s.state as any));
         setLogs(r.logs);
         setPrUrl(r.pr_url);
         setDuration(r.duration_sec);
 
-        if (['success', 'failed', 'error', 'human'].includes(r.status)) {
+        if (['success', 'failed', 'error', 'human', 'cancelled'].includes(r.status)) {
           if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
+          pollingRunIdRef.current = null;
           setRunning(false);
           stopTimer();
+        } else if (r.status === 'awaiting-human') {
+          const implementationRunning = ['generating', 'validating', 'applying', 'verifying', 'creating', 'updating'].includes(
+            r.manual_task?.phase ?? '',
+          );
+          setRunning(implementationRunning);
+          if (!implementationRunning) {
+            if (intervalRef.current) {
+              clearInterval(intervalRef.current);
+              intervalRef.current = null;
+            }
+            stopTimer();
+          }
         }
       } catch { /* keep polling */ }
     }, 2000);
@@ -115,19 +194,88 @@ export default function RunPage() {
   useEffect(() => {
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
+      pollingRunIdRef.current = null;
       stopTimer();
     };
   }, []);
 
+  useEffect(() => {
+    skipManualResumeRef.current = false;
+  }, [activeAppId]);
+
+  useEffect(() => {
+    const handleNewRun = () => {
+      window.history.replaceState(null, '', '/run');
+      clearForNewRun();
+    };
+    window.addEventListener('sdlc:new-run', handleNewRun);
+    return () => window.removeEventListener('sdlc:new-run', handleNewRun);
+  }, [clearForNewRun]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const searchParams = new URLSearchParams(window.location.search);
+    if (searchParams.get('new_run') === '1') {
+      window.history.replaceState(null, '', '/run');
+      clearForNewRun();
+      return () => { cancelled = true; };
+    }
+    if (skipManualResumeRef.current) return;
+    const requestedRunId = searchParams.get('manual_run');
+    if (requestedRunId) window.history.replaceState(null, '', '/run');
+    const loadingRuns = requestedRunId
+      ? getRunStatus(requestedRunId).then((run) => [run])
+      : getRuns(activeAppId);
+    loadingRuns.then((runs) => {
+      if (cancelled || skipManualResumeRef.current || runId) return;
+      const pending = runs.find((run) => (
+        run.app_id === activeAppId
+        && (
+          (run.workflow_mode === 'manual' && run.status === 'awaiting-human')
+          || (
+            run.workflow_mode !== 'manual'
+            && ['in-progress', 'cancelling', 'awaiting-approval'].includes(run.status)
+          )
+        )
+      ));
+      if (!pending) return;
+      setRunId(pending.id);
+      setTicketKey(pending.ticket_key);
+      setWorkflowMode(pending.workflow_mode === 'manual' ? 'manual' : 'automatic');
+      setRecord(pending);
+      setStatus(pending.status);
+      setStepStates(pending.steps.map((step) => step.state));
+      setLogs(pending.logs);
+      setPrUrl(pending.pr_url);
+      setDuration(pending.duration_sec);
+      setRunning(
+        pending.workflow_mode !== 'manual'
+        || ['generating', 'validating', 'applying', 'verifying', 'creating', 'updating'].includes(
+          pending.manual_task?.phase ?? '',
+        ),
+      );
+      startPolling(pending.id);
+    }).catch((loadError: unknown) => {
+      if (!cancelled) {
+        setError(loadError instanceof Error ? loadError.message : 'Could not load manual run details.');
+      }
+    });
+    return () => { cancelled = true; };
+  }, [activeAppId, runId, startPolling, clearForNewRun]);
+
   const handleRun = async () => {
     if (!ticketKey.trim()) return;
-    setError(null); setRunId(null); setStatus(null);
+    skipManualResumeRef.current = true;
+    window.history.replaceState(null, '', '/run');
+    if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
+    pollingRunIdRef.current = null;
+    setError(null); setRunId(null); setStatus(null); setRecord(null);
     setStepStates(STEPS.map(() => 'pending'));
     setLogs({}); setPrUrl(null); setDuration(null);
     setRunning(true);
 
     try {
-      const { run_id } = await runTicket(ticketKey.trim());
+      const { run_id } = await runTicket(ticketKey.trim(), activeAppId, workflowMode);
       setRunId(run_id);
       startPolling(run_id);
     } catch (e: any) {
@@ -136,30 +284,72 @@ export default function RunPage() {
     }
   };
 
-  const isTerminal = status && ['success', 'failed', 'error', 'human'].includes(status);
+  const handleStop = async () => {
+    if (!runId) return;
+    setError(null);
+    try {
+      const updated = await cancelRun(runId);
+      setRecord(updated);
+      setStatus(updated.status);
+      setStepStates(updated.steps.map((step) => step.state));
+      setLogs(updated.logs);
+      if (updated.status === 'cancelled') {
+        setRunning(false);
+        stopTimer();
+      } else {
+        setRunning(true);
+        startPolling(updated.id);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not stop the run.');
+    }
+  };
+
+  const isTerminal = status && ['success', 'failed', 'error', 'human', 'cancelled'].includes(status);
+  const pipelineStepStates = [...stepStates];
+  const manualTask = record?.manual_task;
+  if (record?.status === 'awaiting-human' && manualTask) {
+    const waitingStageIndex = STEPS.findIndex(
+      (step) => step.key === manualTask.stage_key,
+    );
+    if (waitingStageIndex !== -1) {
+      const automatedPhase = ['generating', 'validating', 'applying', 'verifying', 'creating', 'updating']
+        .includes(manualTask.phase);
+      if (automatedPhase) {
+        pipelineStepStates[waitingStageIndex] = 'in-progress';
+      } else if (manualTaskNeedsHumanAction(manualTask)) {
+        pipelineStepStates[waitingStageIndex] = 'human';
+      }
+    }
+  }
 
   return (
     <div className="bg-bg min-h-screen">
-      <div className="bg-animation">
-        <div className="bg-grid" />
-        <div className="bg-orb bg-orb-1" />
-        <div className="bg-orb bg-orb-2" />
-        <div className="bg-orb bg-orb-3" />
-      </div>
-
       <Nav />
 
-      <div className="content" style={{ maxWidth: 900, margin: '0 auto', padding: '40px 32px 48px' }}>
-        <div className="card-main" style={{ padding: '20px 24px', marginBottom: 24 }}>
-          <h1 style={{ fontSize: 24, fontWeight: 800, letterSpacing: '-0.01em' }}>Run Pipeline</h1>
-          <p style={{ fontSize: 13, color: 'var(--color-text-secondary)', marginTop: 4 }}>
-            Trigger a pipeline run for a specific ticket or work item.
-          </p>
-        </div>
+      <div className="content">
+        <PageHeader
+          eyebrow="Pipeline"
+          title="Run Pipeline"
+          description="Trigger a pipeline run for a specific ticket or work item, and watch the agent work live."
+        />
 
         {/* Input */}
-        <div className="card-main" style={{ padding: 28, marginBottom: 24 }}>
-          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 16 }}>
+        <div className="card-main" style={{ padding: 24, marginBottom: 20 }}>
+          <div style={{ marginBottom: 18 }}>
+            <label className="label-main" htmlFor="workflow-mode">Execution mode</label>
+            <select
+              id="workflow-mode"
+              className="input-main"
+              value={workflowMode}
+              disabled={running}
+              onChange={(e) => setWorkflowMode(e.target.value as WorkflowMode)}
+            >
+              <option value="automatic">🤖 Automatic</option>
+              <option value="manual">👤 Manual</option>
+            </select>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 12 }}>
             <div style={{ flex: 1 }}>
               <label className="label-main">Ticket ID</label>
               <input
@@ -174,8 +364,8 @@ export default function RunPage() {
             <button
               className="btn-primary"
               onClick={handleRun}
-              disabled={running || !ticketKey.trim()}
-              style={running ? { opacity: 0.5, pointerEvents: 'none', cursor: 'not-allowed' } : {}}
+              disabled={running || !ticketKey.trim() || !canRun}
+              style={running || !canRun ? { opacity: 0.5, pointerEvents: 'none', cursor: 'not-allowed' } : {}}
             >
               {running ? (
                 <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -186,7 +376,33 @@ export default function RunPage() {
                 </span>
               ) : 'Run Pipeline'}
             </button>
+            {runId
+              && workflowMode !== 'manual'
+              && ['in-progress', 'awaiting-approval', 'cancelling'].includes(status ?? '')
+              && (
+                <button
+                  className="btn-secondary"
+                  type="button"
+                  onClick={handleStop}
+                  disabled={status === 'cancelling' || !canRun}
+                >
+                  {status === 'cancelling' ? 'Stopping…' : 'Stop run'}
+                </button>
+              )}
           </div>
+          {activeApp && (
+            <div className="app-card-meta" style={{ marginTop: 14 }}>
+              <span className="chip purple">Application · {activeApp.name}</span>
+              <span className="chip">{activeApp.ticket_provider === 'ado' ? 'Azure DevOps' : 'Jira'}</span>
+              <span className="chip">{activeApp.target_repo ? `${activeApp.target_repo} · ${activeApp.target_branch}` : 'No repository yet'}</span>
+              <span className="chip">{activeApp.default_persona ? `persona · ${activeApp.default_persona}` : 'persona · auto'}</span>
+              {activeApp.require_pr_approval && <span className="chip purple">🛡️ approval before PR</span>}
+              {activeApp.protected_paths && <span className="chip" title={activeApp.protected_paths}>🔒 protected paths</span>}
+              {activeApp.verify_mode === 'command' && <span className="chip" title="Tests run before any PR opens">🧪 {activeApp.test_command}</span>}
+        {activeApp.verify_mode === 'github_actions' && <span className="chip">⚙️ GitHub Actions{activeApp.ci_workflow ? ` · ${activeApp.ci_workflow}` : ''}</span>}
+            </div>
+          )}
+          {me && !canRun && <div className="locked-note" style={{ marginTop: 14 }}>🔒 Your role is <b>{me.role}</b> — starting runs needs <b>runner</b> or higher. Ask an admin.</div>}
           {error && <p style={{ marginTop: 12, color: 'var(--color-red)', fontSize: 13 }}>{error}</p>}
         </div>
 
@@ -198,33 +414,53 @@ export default function RunPage() {
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24, flexWrap: 'wrap', gap: 12 }}>
               <h2 style={{ fontSize: 18, fontWeight: 700 }}>{ticketKey}</h2>
               <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                {running && (
+                {running && status !== 'awaiting-human' && (
                   <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--color-text-muted)' }}>
-                    {formatDuration(elapsed)}
+                    {status === 'awaiting-approval' && record ? `⏸ ${describeDuration(record)}` : formatDuration(elapsed)}
                   </span>
                 )}
                 {status && <StatusBadge status={status} />}
               </div>
             </div>
 
+            {record && <ManualStagePanel
+              run={record}
+              onCompleted={(updated) => {
+                setRecord(updated);
+                setStatus(updated.status);
+                setStepStates(updated.steps.map((step) => step.state));
+                setLogs(updated.logs);
+                setPrUrl(updated.pr_url);
+                setRunning(
+                  updated.status !== 'awaiting-human'
+                    ? !['success', 'failed', 'error', 'human'].includes(updated.status)
+                    : ['generating', 'validating', 'applying', 'verifying', 'creating', 'updating'].includes(updated.manual_task?.phase ?? ''),
+                );
+                if (['generating', 'validating', 'applying', 'verifying', 'creating', 'updating'].includes(updated.manual_task?.phase ?? '')) {
+                  startPolling(updated.id);
+                }
+              }}
+            />}
+            {status === 'cancelling' && (
+              <p style={{ color: 'var(--color-text-secondary)', fontSize: 13, marginTop: 0 }}>
+                Stop requested. The current operation will finish before the pipeline stops; later stages will not start.
+              </p>
+            )}
+            {record && <ApprovalPanel run={record} onDecided={(r) => { setRecord(r); setStatus(r.status); }} />}
+
             <div style={{ marginBottom: 28 }}>
               <StageProgress
                 stages={STEPS.map(({ key, label }) => ({ key, label }))}
-                states={stepStates}
+                states={pipelineStepStates}
               />
             </div>
-
-            <AgentActivity
-              ticketKey={ticketKey}
-              logs={logs}
-              stepStates={stepStates}
-              prUrl={prUrl}
-            />
 
             <StepTracker
               steps={STEPS.map(({ state, ...rest }) => rest)}
               states={stepStates}
-              logs={{ ...logs, agent: [] }}
+              logs={workflowMode === 'manual' && record
+                ? manualStageLogs(record)
+                : withoutAgentTrace(logs)}
             />
 
             {isTerminal && (
@@ -242,13 +478,18 @@ export default function RunPage() {
                       </a>
                     </p>
                     <p style={{ color: 'var(--color-text-secondary)' }}>
-                      Duration: {formatDuration(duration)}
+                      Duration: {record ? describeDuration(record) : formatDuration(duration)}
                     </p>
                   </div>
                 )}
                 {(status === 'failed' || status === 'error') && (
                   <p style={{ color: 'var(--color-red)', fontSize: 14 }}>
                     Pipeline failed. Check logs for details.
+                  </p>
+                )}
+                {status === 'cancelled' && (
+                  <p style={{ color: 'var(--color-text-secondary)', fontSize: 14 }}>
+                    Pipeline stopped.
                   </p>
                 )}
                 {status === 'human' && (

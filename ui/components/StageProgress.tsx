@@ -1,4 +1,4 @@
-export type StageState = 'pending' | 'in-progress' | 'success' | 'failed' | 'error' | 'human';
+export type StageState = 'pending' | 'in-progress' | 'success' | 'failed' | 'error' | 'human' | 'cancelled';
 
 type Stage = { key: string; label: string };
 
@@ -11,6 +11,7 @@ const STATE_COLOR: Record<StageState, string> = {
   failed: 'var(--color-red)',
   error: 'var(--color-red)',
   human: '#d97706',
+  cancelled: '#64718b',
 };
 
 function StageIcon({ state }: { state: StageState }) {
@@ -93,6 +94,8 @@ export default function StageProgress({ stages, states }: { stages: Stage[]; sta
             const color = STATE_COLOR[state];
             const isFilled = state !== 'pending' && state !== 'in-progress';
             const isActive = state === 'in-progress';
+            const isHuman = state === 'human';
+            const isRobot = isActive || state === 'success';
 
             return (
               <div
@@ -136,6 +139,19 @@ export default function StageProgress({ stages, states }: { stages: Stage[]; sta
                     transition: 'color .3s ease',
                   }}
                 >
+                  {(isRobot || isHuman) && (
+                    <span
+                      aria-hidden="true"
+                      style={{
+                        display: 'inline-block',
+                        marginRight: 3,
+                        fontSize: 11,
+                        verticalAlign: '-1px',
+                      }}
+                    >
+                      {isHuman ? '👤' : '🤖'}
+                    </span>
+                  )}
                   {stage.label}
                 </div>
               </div>

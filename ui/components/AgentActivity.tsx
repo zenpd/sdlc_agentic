@@ -96,9 +96,9 @@ function diffStats(body: string): { added: number; removed: number; startLine: n
 function DiffBlock({ path, body }: { path: string; body: string }) {
   const lines = body.split('\n');
   return (
-    <div style={{ border: '1px solid #22223a', borderRadius: 9, overflow: 'hidden' }}>
+    <div style={{ border: '1px solid #2b3470', borderRadius: 9, overflow: 'hidden' }}>
       <div style={{
-        padding: '6px 10px', background: 'rgba(255,255,255,.03)', borderBottom: '1px solid #22223a',
+        padding: '6px 10px', background: 'rgba(255,255,255,.03)', borderBottom: '1px solid #2b3470',
         fontSize: 10.5, fontFamily: 'var(--font-mono)', color: '#818cf8', fontWeight: 600,
       }}>
         {basename(path)}
@@ -152,7 +152,7 @@ function Badge({ status, textMap }: { status: NodeStatus; textMap?: Partial<Reco
 function TraceNode({
   title, status, children, flex,
 }: { title: string; status: NodeStatus; children?: React.ReactNode; flex?: number }) {
-  const glow = status === 'active' ? '#818cf8' : status === 'done' ? '#34d399' : status === 'failed' ? '#f87171' : status === 'human' ? '#f59e0b' : '#22223a';
+  const glow = status === 'active' ? '#818cf8' : status === 'done' ? '#34d399' : status === 'failed' ? '#f87171' : status === 'human' ? '#f59e0b' : '#2b3470';
   return (
     <div style={{
       flex,
@@ -175,7 +175,7 @@ function TraceNode({
 
 function TraceConnector({ active, color = '#818cf8' }: { active: boolean; color?: string }) {
   return (
-    <div style={{ position: 'relative', width: 2, height: 20, background: active ? `${color}40` : '#22223a', flexShrink: 0 }}>
+    <div style={{ position: 'relative', width: 2, height: 20, background: active ? `${color}40` : '#2b3470', flexShrink: 0 }}>
       {active && (
         <div style={{
           position: 'absolute', left: -3, width: 8, height: 8, borderRadius: '50%',
@@ -190,7 +190,7 @@ function TraceConnector({ active, color = '#818cf8' }: { active: boolean; color?
 function MiniStat({ label, value, color, mono, pulsing }: { label: string; value: string; color: string; mono?: boolean; pulsing?: boolean }) {
   return (
     <div style={{
-      border: `1px solid ${pulsing ? color : '#22223a'}`,
+      border: `1px solid ${pulsing ? color : '#2b3470'}`,
       borderRadius: 9, padding: '7px 10px', minWidth: 0,
       background: pulsing ? `${color}14` : 'rgba(255,255,255,.02)',
       boxShadow: pulsing ? `0 0 12px ${color}33` : 'none',
@@ -226,7 +226,7 @@ export default function AgentActivity({
     if (s === 'failed' || s === 'error') return 'failed';
     return 'pending';
   };
-  const [fetchState, , , gateState, agentState, prState] = stepStates.map(toNodeStatus);
+  const [fetchState, , , gateState, agentState, verifyState, prState] = stepStates.map(toNodeStatus);
 
   const fetchLine = logs.fetch?.[0] ?? '';
   const fetchMatch = fetchLine.match(/^(\S+):\s*(.*?)\s*\(persona:\s*([\w-]+)\)\s*$/);
@@ -268,12 +268,21 @@ export default function AgentActivity({
   const modifiedLine = plainLines.find((l) => l.startsWith('Modified:'));
   const modifiedFiles = modifiedLine ? modifiedLine.replace('Modified:', '').split(',').map((s) => s.trim()).filter(Boolean) : [];
   const failLine = agentState === 'failed' || agentState === 'human' ? plainLines[plainLines.length - 1] : null;
+  // "[TESTS] ✓ pytest -q passed (12s)" / "[TESTS] ✗ Tests failed …" from the app's own test command
+  const testLine = [...plainLines, ...(logs.verify ?? [])].reverse().find((l) => /^\[TESTS\] [✓✗⚠]/.test(l)) ?? null;
+  const testsPassed = testLine?.startsWith('[TESTS] ✓') ?? false;
+  const noTests = testLine?.startsWith('[TESTS] ⚠') ?? false;
 
-  const needsHuman = gateState === 'human' || agentState === 'human' || prState === 'human';
+  const needsHuman = gateState === 'human'
+    || agentState === 'human'
+    || verifyState === 'human'
+    || prState === 'human';
   const humanReason = gateState === 'human'
     ? (gateLine.replace(/^(YES|NO)\s*-\s*/, '') || 'The ticket description needs more detail before the agent can proceed.')
     : agentState === 'human'
     ? (plainLines[plainLines.length - 1] || 'The agent could not complete this ticket automatically.')
+    : verifyState === 'human'
+    ? ((logs.verify ?? []).slice(-1)[0] || 'Verification requires human review.')
     : prState === 'human'
     ? (prLogLines[prLogLines.length - 1] || 'The pipeline paused before opening a pull request.')
     : '';
@@ -282,13 +291,15 @@ export default function AgentActivity({
   const prNumber = prUrl ? prUrl.split('/').pop() : null;
 
   const running = agentState === 'active';
-  const harnessGlow = agentState === 'human' ? '#f59e0b' : hasError ? '#f87171' : running ? '#818cf8' : agentState === 'done' ? '#34d399' : '#22223a';
+  const harnessGlow = agentState === 'human' ? '#f59e0b' : hasError ? '#f87171' : running ? '#818cf8' : agentState === 'done' ? '#34d399' : '#2b3470';
 
   if (!fetchLine && agentState === 'pending') return null;
 
   return (
     <div style={{
-      background: '#0a0a16', border: `1px solid ${needsHuman ? '#f59e0b55' : '#1e1e2e'}`, borderRadius: 16,
+      background: 'linear-gradient(165deg, #0f1745 0%, #131a4f 60%, #22195e 100%)',
+      border: `1px solid ${needsHuman ? '#f59e0b55' : '#283063'}`, borderRadius: 18,
+      boxShadow: '0 18px 40px rgba(17,26,77,.22)',
       padding: 22, marginBottom: 24, position: 'relative', overflow: 'hidden',
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 18 }}>
@@ -374,7 +385,7 @@ export default function AgentActivity({
               const isActive = activeTool === t;
               return (
                 <div key={t} style={{
-                  border: `1px solid ${isActive ? meta.color : '#22223a'}`, borderRadius: 9, padding: '7px 9px',
+                  border: `1px solid ${isActive ? meta.color : '#2b3470'}`, borderRadius: 9, padding: '7px 9px',
                   background: isActive ? `${meta.color}14` : 'rgba(255,255,255,.02)',
                   boxShadow: isActive ? `0 0 12px ${meta.color}33` : 'none',
                   display: 'flex', alignItems: 'center', gap: 7, transition: 'all .2s',
@@ -409,7 +420,7 @@ export default function AgentActivity({
           )}
 
           {recent.length > 0 && (
-            <div style={{ borderTop: '1px solid #1e1e2e', paddingTop: 10, display: 'flex', flexDirection: 'column', gap: 3 }}>
+            <div style={{ borderTop: '1px solid #283063', paddingTop: 10, display: 'flex', flexDirection: 'column', gap: 3 }}>
               {recent.map((p, i) => {
                 const stats = p.diff ? diffStats(p.diff.body) : null;
                 return (
@@ -441,10 +452,28 @@ export default function AgentActivity({
         <TraceConnector active={agentState === 'done'} color="#34d399" />
 
         <div style={{ display: 'flex', gap: 10, width: '100%' }}>
-          <TraceNode title="Verify" status={modifiedFiles.length > 0 ? 'done' : agentState === 'failed' ? 'failed' : agentState === 'human' ? 'human' : 'pending'} flex={1}>
+          <TraceNode title="Verify" status={verifyState} flex={1}>
             <div style={{ fontSize: 11, color: '#8a8aa8', fontFamily: 'var(--font-mono)' }}>
-              {modifiedFiles.length > 0 ? `${modifiedFiles.length} file${modifiedFiles.length > 1 ? 's' : ''} changed` : '—'}
+              {modifiedFiles.length > 0
+                ? `${modifiedFiles.length} file${modifiedFiles.length > 1 ? 's' : ''} changed`
+                : '—'}
             </div>
+            {testLine && (
+              <div title={testLine} style={{ marginTop: 4, fontSize: 11, fontFamily: 'var(--font-mono)', color: testsPassed ? '#34d399' : noTests ? '#fbbf24' : '#f87171', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                {testsPassed ? '✓ tests passed' : noTests ? '⚠ no tests found' : '✗ tests failed'}
+              </div>
+            )}
+            {(logs.verify ?? []).filter((line) => !line.startsWith('[TESTS')).slice(-2).map((line, index) => (
+              <div
+                key={`${index}-${line}`}
+                style={{
+                  marginTop: 4, fontSize: 10, color: '#c8c8dc',
+                  fontFamily: 'var(--font-mono)', overflowWrap: 'anywhere',
+                }}
+              >
+                {line}
+              </div>
+            ))}
           </TraceNode>
           <TraceNode title="Pull Request" status={prState} flex={1}>
             {prUrl ? (

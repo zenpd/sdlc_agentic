@@ -1,73 +1,59 @@
 'use client';
 
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
-import { useEffect, useState } from 'react';
+import { usePathname, useRouter } from 'next/navigation';
+import { useEffect, useRef, useState } from 'react';
+import { getStats, logoutGithub, updatePreferences, type Role } from '@/lib/api';
+import { useActiveApp } from '@/components/AppContext';
 
-const NAV_ITEMS = [
-  { label: 'Home', href: '/', icon: 'home', color: '#6366f1' },
-  { label: 'Dashboard', href: '/dashboard', icon: 'grid', color: '#3b82f6' },
-  { label: 'Run', href: '/run', icon: 'play', color: '#10b981' },
-  { label: 'Bulk Request', href: '/bulk', icon: 'tickets', color: '#14b8a6' },
-  { label: 'Logs', href: '/logs', icon: 'file', color: '#f59e0b' },
+export const appInitials = (name: string) =>
+  name.split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]).join('').toUpperCase() || 'A';
+
+const NAV_ITEMS: Array<{ label: string; href: string; icon: string; color: string; minRole?: Role }> = [
+  { label: 'Dashboard', href: '/', icon: 'home', color: '#7c3aed' },
+  { label: 'Applications', href: '/applications', icon: 'github', color: '#0ea5e9' },
+  { label: 'Run', href: '/run?new_run=1', icon: 'play', color: '#10b981' },
+  { label: 'Bulk Request', href: '/bulk', icon: 'tickets', color: '#f59e0b' },
+  { label: 'History', href: '/logs', icon: 'file', color: '#3b82f6' },
   { label: 'Skills', href: '/skills', icon: 'award', color: '#ec4899' },
-  { label: 'Config', href: '/config', icon: 'settings', color: '#06b6d4' },
-] as const;
+  { label: 'Config', href: '/config', icon: 'settings', color: '#f97316' },
+  { label: 'Activity', href: '/activity', icon: 'activity', color: '#14b8a6', minRole: 'maintainer' },
+  { label: 'Teams', href: '/teams', icon: 'teams', color: '#0891b2', minRole: 'admin' },
+  { label: 'Users', href: '/users', icon: 'users', color: '#6366f1', minRole: 'admin' },
+];
+
+const STROKE = {
+  viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor',
+  strokeWidth: 2, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const,
+};
 
 function NavIcon({ name }: { name: string }) {
-  const common = {
-    width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none',
-    stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const,
-  };
   switch (name) {
     case 'home':
+      return <svg {...STROKE}><path d="m3 11 9-8 9 8v10h-6v-6H9v6H3z" /></svg>;
+    case 'github':
       return (
-        <svg {...common}>
-          <path d="M3 11.5 12 4l9 7.5" />
-          <path d="M5 10v10a1 1 0 0 0 1 1h3v-6h6v6h3a1 1 0 0 0 1-1V10" />
-        </svg>
-      );
-    case 'grid':
-      return (
-        <svg {...common}>
-          <rect x="3" y="3" width="7" height="7" rx="1.5" />
-          <rect x="14" y="3" width="7" height="7" rx="1.5" />
-          <rect x="14" y="14" width="7" height="7" rx="1.5" />
-          <rect x="3" y="14" width="7" height="7" rx="1.5" />
+        <svg viewBox="0 0 24 24" fill="currentColor">
+          <path d="M12 .3a12 12 0 0 0-3.79 23.4c.6.1.82-.26.82-.58v-2.17c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.84 2.81 1.3 3.5 1 .1-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.12-.3-.54-1.52.12-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.29-1.55 3.3-1.23 3.3-1.23.66 1.66.24 2.88.12 3.18.77.84 1.24 1.91 1.24 3.22 0 4.61-2.81 5.62-5.49 5.92.43.37.81 1.1.81 2.22v3.29c0 .32.22.69.83.58A12 12 0 0 0 12 .3Z" />
         </svg>
       );
     case 'play':
-      return (
-        <svg {...common}>
-          <polygon points="5 3 19 12 5 21 5 3" />
-        </svg>
-      );
-    case 'file':
-      return (
-        <svg {...common}>
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-          <polyline points="14 2 14 8 20 8" />
-          <line x1="16" y1="13" x2="8" y2="13" />
-          <line x1="16" y1="17" x2="8" y2="17" />
-        </svg>
-      );
-    case 'award':
-      return (
-        <svg {...common}>
-          <circle cx="12" cy="8" r="6" />
-          <polyline points="8.21 13.89 7 23 12 20 17 23 15.79 13.88" />
-        </svg>
-      );
+      return <svg {...STROKE}><polygon points="6 4 20 12 6 20 6 4" /></svg>;
     case 'tickets':
-      return (
-        <svg {...common}>
-          <path d="M9 11l3 3L22 4" />
-          <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
-        </svg>
-      );
+      return <svg {...STROKE}><rect x="3" y="4" width="5" height="16" rx="1" /><rect x="10" y="4" width="5" height="16" rx="1" /><path d="m17 5 4 14" /></svg>;
+    case 'file':
+      return <svg {...STROKE}><path d="M4 19V9M10 19V5M16 19v-7M22 19V3" /></svg>;
+    case 'award':
+      return <svg {...STROKE}><circle cx="12" cy="8" r="6" /><polyline points="8.21 13.89 7 23 12 20 17 23 15.79 13.88" /></svg>;
+    case 'activity':
+      return <svg {...STROKE}><path d="M12 8v4l3 2" /><circle cx="12" cy="12" r="9" /></svg>;
+    case 'teams':
+      return <svg {...STROKE}><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></svg>;
+    case 'users':
+      return <svg {...STROKE}><circle cx="9" cy="8" r="4" /><path d="M2 21a7 7 0 0 1 14 0" /><path d="M16 4a4 4 0 0 1 0 8M22 21a7 7 0 0 0-4-6.3" /></svg>;
     case 'settings':
       return (
-        <svg {...common}>
+        <svg {...STROKE}>
           <circle cx="12" cy="12" r="3" />
           <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
         </svg>
@@ -77,101 +63,234 @@ function NavIcon({ name }: { name: string }) {
   }
 }
 
-function SunIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="12" cy="12" r="5" />
-      <line x1="12" y1="1" x2="12" y2="3" />
-      <line x1="12" y1="21" x2="12" y2="23" />
-      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
-      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
-      <line x1="1" y1="12" x2="3" y2="12" />
-      <line x1="21" y1="12" x2="23" y2="12" />
-      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
-      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
-    </svg>
-  );
-}
-
-function MoonIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-    </svg>
-  );
-}
-
 export default function Nav() {
   const pathname = usePathname();
+  const router = useRouter();
   const [dark, setDark] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [switcherOpen, setSwitcherOpen] = useState(false);
+  const { apps, teamApps, teams, activeTeamId, setActiveTeamId, activeApp, activeAppId, setActiveAppId, me: githubUser, can } = useActiveApp();
+  const [backendUp, setBackendUp] = useState<boolean | null>(null);
+  const [query, setQuery] = useState('');
+  const searchRef = useRef<HTMLInputElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // A theme saved on the Account page follows the user to any browser.
+  const savedTheme = githubUser?.preferences?.theme;
+  useEffect(() => {
+    if (!savedTheme) return;
+    const next = savedTheme === 'system' ? window.matchMedia('(prefers-color-scheme: dark)').matches : savedTheme === 'dark';
+    document.documentElement.classList.toggle('dark', next);
+    setDark(next);
+    try {
+      if (savedTheme === 'system') localStorage.removeItem('theme');
+      else localStorage.setItem('theme', savedTheme);
+    } catch { /* ignore */ }
+  }, [savedTheme]);
 
   useEffect(() => {
     setDark(document.documentElement.classList.contains('dark'));
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => getStats()
+      .then(() => { if (!cancelled) setBackendUp(true); })
+      .catch(() => { if (!cancelled) setBackendUp(false); });
+    load();
+    const t = setInterval(load, 15000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, []);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        searchRef.current?.focus();
+      }
+      if (e.key === 'Escape') {
+        searchRef.current?.blur();
+        setMenuOpen(false);
+        setSwitcherOpen(false);
+        setMobileOpen(false);
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, []);
+
+  useEffect(() => {
+    if (!menuOpen && !switcherOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+        setSwitcherOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [menuOpen, switcherOpen]);
+
+  const switchApp = (id: string) => {
+    setActiveAppId(id);
+    setSwitcherOpen(false);
+  };
 
   const toggleDark = () => {
     const next = !dark;
     setDark(next);
     document.documentElement.classList.toggle('dark', next);
     localStorage.setItem('theme', next ? 'dark' : 'light');
+    updatePreferences({ theme: next ? 'dark' : 'light' }).catch(() => {});
+  };
+
+  const handleLogout = async () => {
+    setMenuOpen(false);
+    await logoutGithub();
+    router.push('/login');
+  };
+
+  const submitSearch = () => {
+    const q = query.trim();
+    if (!q) return;
+    router.push(`/logs?q=${encodeURIComponent(q)}`);
+    searchRef.current?.blur();
+  };
+
+  const initials = githubUser?.login?.slice(0, 2).toUpperCase() ?? '··';
+  const startNewRun = (event: React.MouseEvent<HTMLAnchorElement>) => {
+    setMobileOpen(false);
+    if (pathname === '/run') {
+      event.preventDefault();
+      window.dispatchEvent(new Event('sdlc:new-run'));
+    }
   };
 
   return (
     <>
-      {/* Mobile-only top bar: brand + hamburger. Hidden on desktop via CSS. */}
-      <div className="mobile-topbar">
-        <button
-          onClick={() => setMobileOpen((o) => !o)}
-          aria-label="Toggle menu"
-          className="hamburger-btn"
-        >
-          {mobileOpen ? (
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-            </svg>
-          ) : (
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="18" x2="21" y2="18" />
-            </svg>
-          )}
-        </button>
-        <div className="nav-brand">
-          <div className="brand-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
-            </svg>
-          </div>
-          <div className="brand-name">SDLC</div>
+      <header className="topbar">
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+          <button className="icon-btn mobile-menu" aria-label="Toggle navigation" onClick={() => setMobileOpen((o) => !o)}>
+            <svg {...STROKE}><path d="M4 7h16M4 12h16M4 17h16" /></svg>
+          </button>
+          <Link href="/" className="topbar-brand">
+            <span className="app-switcher" aria-hidden="true">
+              {Array.from({ length: 9 }).map((_, i) => <i key={i} />)}
+            </span>
+            <span className="brand-mark">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+              </svg>
+            </span>
+            <span className="brand-text">Agent SDLC</span>
+          </Link>
         </div>
-      </div>
+
+        <label className="topbar-search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" /></svg>
+          <input
+            ref={searchRef}
+            type="search"
+            placeholder="Search runs by ticket ID…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') submitSearch(); }}
+          />
+          <kbd>Ctrl K</kbd>
+        </label>
+
+        <div className="top-actions" ref={menuRef}>
+          <div className="app-switch">
+            <button
+              className={`app-pill${switcherOpen ? ' open' : ''}`}
+              aria-label="Switch application"
+              onClick={() => { setSwitcherOpen((o) => !o); setMenuOpen(false); }}
+            >
+              <span className="app-avatar">{appInitials(activeApp?.name ?? 'Default')}</span>
+              <span className="app-pill-text">
+                <small>Application</small>
+                <b>{activeApp?.name ?? 'Default application'}</b>
+              </span>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6" /></svg>
+            </button>
+            {switcherOpen && (
+              <div className="account-menu app-menu">
+                <div className="account-menu-head">
+                  <small>Switch application</small>
+                  <b>{teamApps.length} of {apps.length} you can access</b>
+                </div>
+                {teams.length > 0 && (
+                  <div className="team-filter">
+                    <button className={!activeTeamId ? 'on' : ''} onClick={() => setActiveTeamId('')}>All teams</button>
+                    {teams.map((t) => (
+                      <button key={t.id} className={activeTeamId === t.id ? 'on' : ''} onClick={() => setActiveTeamId(t.id)}>{t.name}</button>
+                    ))}
+                  </div>
+                )}
+                {teamApps.map((a) => (
+                  <button key={a.id} className={`app-option${a.id === activeAppId ? ' active' : ''}`} onClick={() => switchApp(a.id)}>
+                    <span className="app-avatar">{appInitials(a.name)}</span>
+                    <span className="app-option-text">
+                      {a.name}
+                      <span>{a.team || 'Shared'} · {a.ticket_provider === 'ado' ? 'Azure DevOps' : 'Jira'} · {a.target_repo || 'no repository yet'}</span>
+                    </span>
+                    {a.id === activeAppId && <span className="app-option-check">✓</span>}
+                  </button>
+                ))}
+                <div className="app-menu-divider" />
+                {can('admin') && <Link href="/applications?onboard=1" onClick={() => setSwitcherOpen(false)}>＋ Onboard application</Link>}
+                <Link href="/applications" onClick={() => setSwitcherOpen(false)}>Manage applications</Link>
+              </div>
+            )}
+          </div>
+          <button className="icon-btn" aria-label="Toggle theme" onClick={toggleDark} title={dark ? 'Light theme' : 'Dark theme'}>
+            {dark ? (
+              <svg {...STROKE}><circle cx="12" cy="12" r="5" /><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" /></svg>
+            ) : (
+              <svg {...STROKE}><path d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5 8.5 8.5 0 1 0 20.5 14.5Z" /></svg>
+            )}
+          </button>
+          <button
+            className="avatar-btn"
+            aria-label="Account"
+            onClick={() => { setMenuOpen((o) => !o); setSwitcherOpen(false); }}
+            style={{ backgroundImage: githubUser?.avatar_url ? `url(${githubUser.avatar_url})` : undefined }}
+          >
+            {!githubUser?.avatar_url && initials}
+          </button>
+          {menuOpen && (
+            <div className="account-menu">
+              <div className="account-menu-head">
+                <small>Signed in with GitHub</small>
+                <b>{githubUser ? `@${githubUser.login}` : 'Unknown user'}</b>
+                {githubUser && <span className={`role-badge ${githubUser.role}`}>{githubUser.role}</span>}
+              </div>
+              <Link href="/account" onClick={() => setMenuOpen(false)}>Account settings</Link>
+              <Link href="/applications" onClick={() => setMenuOpen(false)}>Manage applications</Link>
+              <button onClick={handleLogout}>Log out</button>
+            </div>
+          )}
+        </div>
+      </header>
 
       {mobileOpen && <div className="sidebar-backdrop" onClick={() => setMobileOpen(false)} />}
 
       <aside className={`sidebar${mobileOpen ? ' open' : ''}`}>
-        <Link href="/" className="sidebar-brand-link" onClick={() => setMobileOpen(false)}>
-          <div className="nav-brand">
-            <div className="brand-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
-              </svg>
-            </div>
-            <div>
-              <div className="brand-name">SDLC</div>
-              <div className="brand-sub">Automation</div>
-            </div>
-          </div>
+        <Link href="/run?new_run=1" className="sidebar-cta" onClick={startNewRun}>
+          <svg {...STROKE}><path d="M12 5v14M5 12h14" /></svg>
+          New run
         </Link>
 
         <nav className="sidebar-nav">
-          {NAV_ITEMS.map(({ label, href, icon, color }) => (
+          {NAV_ITEMS.filter((item) => !item.minRole || can(item.minRole)).map(({ label, href, icon, color }) => (
             <Link
               key={href}
               href={href}
-              onClick={() => setMobileOpen(false)}
-              className={`nav-link${pathname === href ? ' active' : ''}`}
+              onClick={label === 'Run' ? startNewRun : () => setMobileOpen(false)}
+              className={`nav-link${pathname === href.split('?')[0] ? ' active' : ''}`}
             >
-              <span className="nav-link-icon" style={{ '--nav-icon-color': color } as React.CSSProperties}>
+              <span className="nav-icon" style={{ '--nav-color': color } as React.CSSProperties}>
                 <NavIcon name={icon} />
               </span>
               {label}
@@ -180,26 +299,9 @@ export default function Nav() {
         </nav>
 
         <div className="sidebar-footer">
-          <div className="status-pill">
-            <span className="status-dot" />
-            Online
-          </div>
-          <div className="sidebar-footer-row">
-            <Link href="/login" className="user-avatar" style={{ textDecoration: 'none' }}>
-              NB
-            </Link>
-            <button
-              onClick={toggleDark}
-              aria-label="Toggle dark mode"
-              style={{
-                width: 32, height: 32, borderRadius: 8, border: '1px solid var(--color-border)',
-                background: 'var(--color-surface)', color: 'var(--color-text-secondary)',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                cursor: 'pointer', transition: 'all .15s',
-              }}
-            >
-              {dark ? <SunIcon /> : <MoonIcon />}
-            </button>
+          <div className={`server-pill${backendUp === false ? ' down' : ''}`}>
+            <span className={backendUp === false ? 'dot red' : 'dot'} />
+            {backendUp === false ? 'Backend unreachable' : 'Pipeline server connected'}
           </div>
         </div>
       </aside>

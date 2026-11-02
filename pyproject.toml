@@ -105,11 +105,17 @@ combine-as-imports = true
 force-single-line = false
 lines-after-imports = 2
 
-# Pytest configuration — this app has no tests yet; testpaths points at
-# backend/tests/ so `uv run pytest` is ready the moment tests are added there.
+# Pytest configuration. testpaths covers both backend/tests/ (reserved, not
+# yet populated) and tests/ (the real suite). pythonpath is required because
+# `uv run pytest`/the bare `pytest` entry point do not add the repo root to
+# sys.path the way `python -m pytest` does — without it, tests/conftest.py's
+# `from backend import ...` fails with ModuleNotFoundError even though every
+# test itself is fine.
 [tool.pytest.ini_options]
+pythonpath = ["."]
 testpaths = [
-    "backend/tests"
+    "backend/tests",
+    "tests"
 ]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]

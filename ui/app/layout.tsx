@@ -1,23 +1,22 @@
 import type { Metadata } from 'next';
 import './globals.css';
+import AuthGate from '@/components/AuthGate';
+import { AppProvider } from '@/components/AppContext';
 
 export const metadata: Metadata = {
-  title: 'SDLC Automation',
-  description: 'AI-powered SDLC automation',
+  title: 'Agent SDLC',
+  description: 'Autonomous ticket-to-pull-request automation',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
+    // The inline theme script adds `dark` to <html> before hydration on purpose.
+    <html lang="en" suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: `(function(){var t=localStorage.getItem('theme');if(t==='dark'||(t==null&&window.matchMedia('(prefers-color-scheme:dark)').matches)){document.documentElement.classList.add('dark')}})()` }} />
-        <link
-          href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@300;400;500&family=Inter:wght@300;400;500;600;700;800&display=swap"
-          rel="stylesheet"
-        />
       </head>
       <body>
-        {children}
+        <AuthGate><AppProvider>{children}</AppProvider></AuthGate>
       </body>
     </html>
   );
