@@ -204,6 +204,8 @@ def manual_task(
         "questions": (task_data or {}).get("questions", []),
         "analysis": (task_data or {}).get("analysis", ""),
         "attempts": (task_data or {}).get("attempts", []),
+        "model_overrides": (task_data or {}).get("model_overrides", {}),
+        "persona_overrides": (task_data or {}).get("persona_overrides", {}),
         "context": context,
         "phase": (task_data or {}).get("phase", ""),
         "branch": (task_data or {}).get("branch", ""),

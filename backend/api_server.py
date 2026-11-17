@@ -7,7 +7,8 @@ import secrets
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import UTC, datetime, timezone
 from typing import Any, Literal, Optional
 from urllib.parse import urlparse
 
@@ -273,6 +274,82 @@ def _pipeline_config(app_id: str) -> PipelineConfig:
         raise HTTPException(status_code=400, detail=str(e))
 
 
+_MANUAL_MODEL_KEYS = {"clarity_gate", "coding", "verification"}
+
+
+def _update_manual_model_overrides(
+    current: dict[str, str],
+    submitted: dict[str, str],
+) -> dict[str, str]:
+    overrides = dict(current)
+    for stage, deployment in submitted.items():
+        if stage not in _MANUAL_MODEL_KEYS:
+            raise ValueError(f"Unknown manual model stage: {stage}")
+        deployment = deployment.strip()
+        if deployment and not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", deployment):
+            raise ValueError(
+                f"The {stage.replace('_', ' ')} deployment name is invalid"
+            )
+        if deployment:
+            overrides[stage] = deployment
+        else:
+            overrides.pop(stage, None)
+    return overrides
+
+
+def _manual_model_config(
+    config: PipelineConfig,
+    model_overrides: dict[str, str],
+) -> PipelineConfig:
+    return replace(
+        config,
+        clarity_gate_deployment=(
+            model_overrides.get("clarity_gate") or config.azure_deployment
+        ),
+        coding_deployment=model_overrides.get("coding") or config.azure_deployment,
+        verification_deployment=(
+            model_overrides.get("verification") or config.azure_deployment
+        ),
+    )
+
+
+_MANUAL_PERSONA_STAGES = {"coding": "code", "verification": "verify"}
+
+
+def _manual_run_stopped(run_id: str) -> bool:
+    run = runs_db.get_run(run_id)
+    return not run or run["status"] in {"cancelled", "cancelling"}
+
+
+def _update_manual_persona_overrides(
+    current: dict[str, str],
+    submitted: dict[str, str],
+    app_id: str,
+) -> dict[str, str]:
+    overrides = dict(current)
+    unknown = set(submitted) - _MANUAL_PERSONA_STAGES.keys()
+    if unknown:
+        raise ValueError(f"Unknown manual persona stage: {min(unknown)}")
+    for selection, pipeline_stage in _MANUAL_PERSONA_STAGES.items():
+        if selection not in submitted:
+            continue
+        persona = submitted[selection].strip()
+        if not persona:
+            overrides.pop(selection, None)
+            continue
+        eligible = {
+            entry["slug"]
+            for entry in skills_store.list_skills(stage=pipeline_stage, app_id=app_id)
+            if "error" not in entry
+        }
+        if persona not in eligible:
+            raise ValueError(
+                f"The selected {selection} persona is not enabled for this application"
+            )
+        overrides[selection] = persona
+    return overrides
+
+
 def _fetch_manual_ticket_fields(
     ticket_key: str,
     config: PipelineConfig,
@@ -525,6 +602,7 @@ def _manual_clarity_task_data(
     analysis: dict,
     values: dict[str, str],
     attempts: list[dict],
+    model_overrides: dict[str, str] | None = None,
 ) -> dict:
     return {
         "instructions": (
@@ -537,6 +615,7 @@ def _manual_clarity_task_data(
         "analysis": analysis["reason"],
         "questions": analysis["questions"],
         "attempts": attempts,
+        "model_overrides": model_overrides or {},
         "initial_values": {
             "summary": analysis["suggested_summary"] or values["summary"],
             "description": analysis["suggested_description"] or values["description"],
@@ -788,6 +867,7 @@ def run_ticket(req: RunTicketRequest, user: dict = runner):
 class ManualStageResultRequest(BaseModel):
     action: Literal[
         "submit",
+        "approve_request",
         "request_changes",
         "apply_edits",
         "accept_implementation",
@@ -803,6 +883,8 @@ class ManualStageResultRequest(BaseModel):
     result: dict[str, str] = Field(default_factory=dict)
     files: dict[str, Optional[str]] | None = None
     feedback: str = ""
+    model_overrides: dict[str, str] = Field(default_factory=dict)
+    persona_overrides: dict[str, str] = Field(default_factory=dict)
 
 
 def _manual_implementation_event(
@@ -812,6 +894,8 @@ def _manual_implementation_event(
     message: str,
     user_id: str | None = None,
 ) -> None:
+    if _manual_run_stopped(run_id):
+        return
     runs_db.update_step(
         run_id, "agent", state, redact(message, config.github_token, config.azure_key)
     )
@@ -835,7 +919,11 @@ def _run_manual_implementation(run_id: str, actor: str, feedback: str = "") -> N
         or run["manual_task"]["stage_key"] != "agent"
     ):
         return
-    config = _pipeline_config(run["app_id"])
+    task_data = runs_db.get_manual_task_data(run_id)
+    config = _manual_model_config(
+        _pipeline_config(run["app_id"]),
+        task_data.get("model_overrides", {}),
+    )
     if not _run_slots.acquire(blocking=False):
         _manual_implementation_event(
             run_id,
@@ -911,6 +999,22 @@ def _run_manual_implementation_work(
             on_agent_event,
             on_usage,
             on_checkpoint,
+            cancel_check=lambda: _manual_run_stopped(run_id),
+        )
+        if _manual_run_stopped(run_id):
+            return
+        _manual_implementation_event(
+            run_id,
+            config,
+            "in-progress",
+            (
+                "Stage details: "
+                f"Persona={proposal.get('coding_persona', 'unknown')}; "
+                f"Model={proposal.get('coding_model', config.coding_model)}; "
+                "AI coding is non-deterministic; configured test commands are repeatable "
+                "for the same code and environment"
+            ),
+            actor,
         )
         runs_db.update_manual_task_data(
             run_id,
@@ -929,6 +1033,8 @@ def _run_manual_implementation_work(
             actor,
         )
     except Exception as exc:
+        if _manual_run_stopped(run_id):
+            return
         logger.exception(
             "Manual implementation agent failed",
             extra={"run_id": run_id, "app_id": run["app_id"]},
@@ -1021,12 +1127,21 @@ def _validate_manual_implementation_work(
             "Validating the human-approved files and running configured checks",
             actor,
         )
-        implementation = validate_and_commit(run_id, config, task_data)
+        implementation = validate_and_commit(
+            run_id,
+            config,
+            task_data,
+            cancel_check=lambda: _manual_run_stopped(run_id),
+        )
+        if _manual_run_stopped(run_id):
+            return
         implementation["approved_by"] = actor
         next_task_data = {
             "phase": "verifying",
             "branch": implementation["branch"],
             "base_sha": implementation["base_sha"],
+            "model_overrides": task_data.get("model_overrides", {}),
+            "persona_overrides": task_data.get("persona_overrides", {}),
         }
         updated = runs_db.complete_manual_stage(
             run_id,
@@ -1072,6 +1187,8 @@ def _validate_manual_implementation_work(
         if updated["manual_task"]["stage_key"] == "verify":
             _start_manual_verification(run_id, actor)
     except Exception as exc:
+        if _manual_run_stopped(run_id):
+            return
         logger.exception(
             "Manual implementation validation failed",
             extra={"run_id": run_id, "app_id": run["app_id"]},
@@ -1129,6 +1246,8 @@ def _manual_verification_event(
     message: str,
     user_id: str | None = None,
 ) -> None:
+    if _manual_run_stopped(run_id):
+        return
     safe_message = redact(message, config.github_token, config.azure_key)
     runs_db.update_step(run_id, "verify", state, safe_message)
     run = runs_db.get_run(run_id) or {}
@@ -1155,7 +1274,10 @@ def _run_manual_verification(run_id: str, actor: str) -> None:
     task_data = dict(runs_db.get_manual_task_data(run_id))
     if task_data.get("phase") != "verifying":
         return
-    config = _pipeline_config(run["app_id"])
+    config = _manual_model_config(
+        _pipeline_config(run["app_id"]),
+        task_data.get("model_overrides", {}),
+    )
     if not _run_slots.acquire(blocking=False):
         _manual_verification_event(
             run_id,
@@ -1212,6 +1334,25 @@ def _run_manual_verification(run_id: str, actor: str) -> None:
             implementation,
             on_event,
             on_usage,
+            persona_override=task_data.get("persona_overrides", {}).get(
+                "verification", ""
+            ),
+            cancel_check=lambda: _manual_run_stopped(run_id),
+        )
+        if _manual_run_stopped(run_id):
+            return
+        _manual_verification_event(
+            run_id,
+            config,
+            "in-progress",
+            (
+                "Stage details: "
+                f"Persona={report.get('persona', 'unknown')}; "
+                f"Model={report.get('model', config.verification_model)}; "
+                "configured checks are repeatable for the same code and environment; "
+                "AI review is non-deterministic"
+            ),
+            actor,
         )
         refreshed_task = dict(runs_db.get_manual_task_data(run_id))
         refreshed_task.update({"phase": "review", "report": report, "error": ""})
@@ -1232,6 +1373,8 @@ def _run_manual_verification(run_id: str, actor: str) -> None:
             actor,
         )
     except Exception as exc:
+        if _manual_run_stopped(run_id):
+            return
         logger.exception(
             "Manual verification failed",
             extra={"run_id": run_id, "app_id": run["app_id"]},
@@ -1416,6 +1559,8 @@ def _run_manual_pr_creation(run_id: str, actor: str) -> None:
         config = _pipeline_config(run["app_id"])
         _run_slots.acquire()
         slot_acquired = True
+        if _manual_run_stopped(run_id):
+            return
         results = runs_db.get_manual_results(run_id)
         implementation = results.get("agent", {}).get("result", {})
         verification = results.get("verify", {}).get("result", {})
@@ -1429,6 +1574,8 @@ def _run_manual_pr_creation(run_id: str, actor: str) -> None:
             implementation,
             verification,
         )
+        if _manual_run_stopped(run_id):
+            return
         pr = _verify_manual_pull_request(
             run_id,
             config,
@@ -1443,6 +1590,8 @@ def _run_manual_pr_creation(run_id: str, actor: str) -> None:
                 "state": pr["state"],
             },
         )
+        if _manual_run_stopped(run_id):
+            return
         runs_db.complete_manual_stage(
             run_id,
             "automation",
@@ -1460,6 +1609,8 @@ def _run_manual_pr_creation(run_id: str, actor: str) -> None:
         )
         _start_manual_ticket_update(run_id, actor)
     except Exception as exc:
+        if _manual_run_stopped(run_id):
+            return
         logger.exception(
             "Manual pull request creation failed",
             extra={"run_id": run_id, "app_id": run["app_id"]},
@@ -1578,6 +1729,8 @@ def _run_manual_ticket_update(run_id: str, actor: str) -> None:
         config = _pipeline_config(run["app_id"])
         _run_slots.acquire()
         slot_acquired = True
+        if _manual_run_stopped(run_id):
+            return
         results = runs_db.get_manual_results(run_id)
         fetched = results.get("fetch", {}).get("result", {})
         approved = results.get("gate", {}).get("result", fetched)
@@ -1591,6 +1744,8 @@ def _run_manual_ticket_update(run_id: str, actor: str) -> None:
         if not pull_request.get("url"):
             raise RuntimeError("The confirmed pull request URL is missing")
 
+        if _manual_run_stopped(run_id):
+            return
         status_result = _run_manual_ticket_operation(
             run,
             "jira",
@@ -1598,6 +1753,8 @@ def _run_manual_ticket_update(run_id: str, actor: str) -> None:
             config,
             target_status=config.status_done,
         )
+        if _manual_run_stopped(run_id):
+            return
         comment = _manual_ticket_comment(
             run_id,
             run["ticket_key"],
@@ -1613,6 +1770,8 @@ def _run_manual_ticket_update(run_id: str, actor: str) -> None:
                 ticket_key=run["ticket_key"],
             )
         )
+        if _manual_run_stopped(run_id):
+            return
         if existing_comments.is_error:
             raise RuntimeError(
                 "The ticket provider could not check prior completion comments"
@@ -1621,6 +1780,8 @@ def _run_manual_ticket_update(run_id: str, actor: str) -> None:
             f"[sdlc-agentic-run:{run_id}]" in existing_comments.text
         )
         if not comment_already_exists:
+            if _manual_run_stopped(run_id):
+                return
             ticket = config.ticket_executor()
             comment_result = ticket(
                 config.ticket_action(
@@ -1634,6 +1795,8 @@ def _run_manual_ticket_update(run_id: str, actor: str) -> None:
         if comment_result.is_error:
             raise RuntimeError("The ticket provider rejected the completion comment")
 
+        if _manual_run_stopped(run_id):
+            return
         ticket = config.ticket_executor()
         comments_confirmation = ticket(
             config.ticket_action(
@@ -1654,6 +1817,8 @@ def _run_manual_ticket_update(run_id: str, actor: str) -> None:
             if config.ticket_provider == "jira"
             else {}
         )
+        if _manual_run_stopped(run_id):
+            return
         confirmation = ticket(
             config.ticket_action(
                 command="get_ticket",
@@ -1692,6 +1857,8 @@ def _run_manual_ticket_update(run_id: str, actor: str) -> None:
             "pr_url": pull_request["url"],
             "evidence": evidence,
         }
+        if _manual_run_stopped(run_id):
+            return
         runs_db.complete_manual_stage(
             run_id,
             "automation",
@@ -1714,6 +1881,8 @@ def _run_manual_ticket_update(run_id: str, actor: str) -> None:
             {"run_id": run_id, "ticket_update": update_result},
         )
     except Exception as exc:
+        if _manual_run_stopped(run_id):
+            return
         logger.exception(
             "Manual final ticket update failed",
             extra={"run_id": run_id, "app_id": run["app_id"]},
@@ -1781,15 +1950,103 @@ def complete_manual_stage(
     run = _run_or_404(user, run_id)
     if run["workflow_mode"] != "manual":
         raise HTTPException(status_code=409, detail="This run is not in manual mode")
-    if run["status"] != "awaiting-human" or not run["manual_task"]:
+    if not run["manual_task"]:
+        raise HTTPException(
+            status_code=409,
+            detail="This run is not waiting for a manual stage",
+        )
+    if run["status"] != "awaiting-human":
         raise HTTPException(
             status_code=409,
             detail="This run is not waiting for a manual stage",
         )
 
     stage_key = run["manual_task"]["stage_key"]
+    task_data = runs_db.get_manual_task_data(run_id)
+    if req.action == "approve_request":
+        if run["status"] != "awaiting-human":
+            raise HTTPException(
+                status_code=409,
+                detail="Only a pending Manual stage can be approved here",
+            )
+        if stage_key in {"fetch", "assign", "in_progress", "gate"}:
+            action = "submit"
+            result = dict(task_data.get("initial_values") or {})
+            if not result:
+                result = dict(run["manual_task"].get("initial_values") or {})
+            if (
+                stage_key == "gate"
+                and len(result.get("relevant_context", "").strip()) < 5
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "This clarity request needs at least five characters of "
+                        "relevant context before it can be approved"
+                    ),
+                )
+            files = None
+        elif stage_key == "agent" and task_data.get("phase") in (
+            "review",
+            "validation_failed",
+        ):
+            action = "accept_implementation"
+            result = {}
+            files = {
+                item["path"]: None if item.get("deleted") else item.get("content", "")
+                for item in task_data.get("proposed_files", [])
+            }
+        elif (
+            stage_key == "verify"
+            and task_data.get("phase") == "review"
+            and (task_data.get("report") or {}).get("decision") == "pass"
+        ):
+            action = "accept_verification"
+            result = {}
+            files = None
+        else:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This stage needs its specific review action or evidence. "
+                    "Open the run to review the available stage controls."
+                ),
+            )
+        updated = complete_manual_stage(
+            run_id,
+            req.model_copy(update={
+                "action": action,
+                "result": result,
+                "files": files,
+            }),
+            user,
+        )
+        audit_store.record(
+            user["login"],
+            "approval_request.approve",
+            f"Ticket {run['ticket_key']} · {stage_key}",
+            run["app_id"],
+            {
+                "run_id": run_id,
+                "stage_action": action,
+            },
+        )
+        return updated
+
+    try:
+        model_overrides = _update_manual_model_overrides(
+            task_data.get("model_overrides", {}),
+            req.model_overrides,
+        )
+        persona_overrides = _update_manual_persona_overrides(
+            task_data.get("persona_overrides", {}),
+            req.persona_overrides,
+            run["app_id"],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    task_data["persona_overrides"] = persona_overrides
     if stage_key == "pr":
-        task_data = runs_db.get_manual_task_data(run_id)
         phase = task_data.get("phase")
         if req.action == "retry_pr_creation":
             if phase != "failed":
@@ -1822,7 +2079,6 @@ def complete_manual_stage(
             )
 
     if stage_key == "jira":
-        task_data = runs_db.get_manual_task_data(run_id)
         phase = task_data.get("phase")
         if req.action == "retry_ticket_update":
             if phase != "failed":
@@ -1856,7 +2112,6 @@ def complete_manual_stage(
         )
 
     if stage_key == "verify":
-        task_data = runs_db.get_manual_task_data(run_id)
         phase = task_data.get("phase")
         if req.action == "retry_verification":
             if phase not in ("failed", "review"):
@@ -1869,6 +2124,7 @@ def complete_manual_stage(
                 "phase": "verifying",
                 "report": None,
                 "error": "",
+                "model_overrides": model_overrides,
             }
             try:
                 runs_db.update_manual_task_data(
@@ -2077,6 +2333,8 @@ def complete_manual_stage(
                     "summary": implementation.get("summary", ""),
                     "agent_summary": implementation.get("summary", ""),
                     "feedback": feedback,
+                    "model_overrides": model_overrides,
+                    "persona_overrides": persona_overrides,
                     **proposal,
                 }
                 updated = runs_db.return_manual_stage(
@@ -2111,7 +2369,6 @@ def complete_manual_stage(
         )
 
     if stage_key == "agent":
-        task_data = runs_db.get_manual_task_data(run_id)
         phase = task_data.get("phase")
         if req.action == "apply_edits":
             if phase not in ("review", "validation_failed") or req.files is None:
@@ -2204,6 +2461,7 @@ def complete_manual_stage(
             next_data = {
                 **task_data,
                 "phase": "generating",
+                "model_overrides": model_overrides,
                 "feedback": feedback,
                 "error": "",
                 "test_output": "",
@@ -2325,6 +2583,7 @@ def complete_manual_stage(
                 "approved_by": user["login"],
                 "review_skipped": skipping_review,
                 "test_output": "",
+                "model_overrides": model_overrides,
             }
             original_files = {
                 item["path"]: None if item.get("deleted") else item["content"]
@@ -2397,6 +2656,8 @@ def complete_manual_stage(
     next_task_data = None
     try:
         result = validate_manual_result(stage_key, req.result)
+        if _manual_run_stopped(run_id):
+            return runs_db.get_run(run_id)
         config = PipelineConfig.from_settings(
             apps_store.resolve_settings(run["app_id"]),
             app_id=run["app_id"],
@@ -2432,11 +2693,13 @@ def complete_manual_stage(
             }
             try:
                 analysis = _analyze_manual_clarity(
-                    config,
+                    _manual_model_config(config, model_overrides),
                     run["ticket_key"],
                     gate_values,
                 )
             except Exception as e:
+                if _manual_run_stopped(run_id):
+                    return runs_db.get_run(run_id)
                 logger.exception(
                     "Manual clarity gate analysis failed",
                     extra={"run_id": run_id, "app_id": run["app_id"]},
@@ -2478,6 +2741,7 @@ def complete_manual_stage(
                             "analysis": analysis["reason"],
                         }
                     ],
+                    model_overrides,
                 )
                 run_events.record(
                     run_id,
@@ -2491,7 +2755,7 @@ def complete_manual_stage(
         elif stage_key == "gate":
             try:
                 analysis = _analyze_manual_clarity(
-                    config,
+                    _manual_model_config(config, model_overrides),
                     run["ticket_key"],
                     result,
                 )
@@ -2525,6 +2789,7 @@ def complete_manual_stage(
                     analysis,
                     result,
                     attempts,
+                    model_overrides,
                 )
                 updated = runs_db.update_manual_task_data(
                     run_id,
@@ -2580,7 +2845,15 @@ def complete_manual_stage(
                 target_status=config.status_in_progress,
             )
         if stage_key in ("fetch", "gate") and not next_task_data:
-            next_task_data = {"phase": "generating"}
+            next_task_data = {
+                "phase": "generating",
+                "model_overrides": model_overrides,
+                "persona_overrides": persona_overrides,
+            }
+        if stage_key in ("fetch", "gate") and next_task_data:
+            next_task_data["persona_overrides"] = persona_overrides
+        if _manual_run_stopped(run_id):
+            return runs_db.get_run(run_id)
         if stage_key == "pr":
             next_task_data = {"phase": "updating"}
             prior_results = runs_db.get_manual_results(run_id)
@@ -2914,16 +3187,22 @@ def cancel_run(run_id: str, user: dict = runner):
             status_code=409,
             detail="This run is no longer active or cannot be cancelled",
         )
+    stopped = runs_db.get_run(run_id)
+    finalizing = bool(stopped and stopped["status"] == "cancelled")
     run_events.record(
         run_id,
         run["app_id"],
         run["ticket_key"],
         "run",
-        "cancelling",
-        f"Stop requested by @{user['login']}",
+        "cancelled" if finalizing else "cancelling",
+        (
+            f"Run stopped by @{user['login']}"
+            if finalizing
+            else f"Stop requested by @{user['login']}"
+        ),
         user_id=user["login"],
     )
-    return runs_db.get_run(run_id)
+    return stopped
 
 
 @app.get("/api/runs")
@@ -2942,9 +3221,144 @@ def list_runs(
     )
 
 
+def _approval_request_item(run: dict) -> dict:
+    manual = run.get("manual_task") or {}
+    stage_key = manual.get("stage_key") or "pr"
+    logs = run.get("logs") or {}
+    persona = (
+        next(
+            (
+                match.group(1)
+                for entry in logs.get("verify", [])
+                if (match := re.search(r"Verification persona:\s*([\w-]+)", entry))
+            ),
+            None,
+        )
+        or next(
+            (
+                match.group(1)
+                for entry in logs.get("fetch", [])
+                if (match := re.search(r"\(persona:\s*([\w-]+)\)", entry))
+            ),
+            None,
+        )
+        or {
+            "gate": "clarity-gate",
+            "verify": "verification-reviewer",
+            "agent": "implementation-review",
+        }.get(stage_key, "general-review")
+    )
+    if run["status"] == "awaiting-approval":
+        reason = (
+            "Application policy requires a human to approve this change before "
+            "the pull request is opened."
+        )
+    else:
+        report = manual.get("report") or {}
+        reason = (
+            manual.get("analysis")
+            or manual.get("error")
+            or report.get("decision_reason")
+            or report.get("summary")
+            or manual.get("instructions")
+            or "The workflow is waiting for a human stage decision."
+        )
+    return {
+        "id": run["id"],
+        "run": run,
+        "kind": (
+            "pull_request"
+            if run["status"] == "awaiting-approval"
+            else "manual_stage"
+        ),
+        "stage_key": stage_key,
+        "stage_label": manual.get("label") or "Pull request approval",
+        "persona": persona,
+        "reason": reason,
+        "requested_at": (
+            (run.get("approval") or {}).get("requested_at")
+            or run.get("started_at")
+        ),
+    }
+
+
+@app.get("/api/approvals")
+def list_approval_requests(
+    app_id: Optional[str] = Query(default=None),
+    user: dict = viewer,
+):
+    """List pending Manual handoffs and pull-request approvals visible to a user."""
+    if app_id:
+        _check_app_access(user, app_id)
+    runs = runs_db.get_approval_runs(
+        app_id=app_id,
+        app_ids=None if app_id else visible_app_ids(user),
+    )
+    return [_approval_request_item(run) for run in runs]
+
+
 class ApprovalRequest(BaseModel):
     decision: str  # "approve" | "reject"
-    note: str = ""
+    note: str = Field(default="", max_length=3000)
+
+
+class ApprovalInboxActionRequest(BaseModel):
+    action: Literal["approve", "reject"]
+
+
+@app.post("/api/approvals/{run_id}")
+def act_on_approval_request(
+    run_id: str,
+    req: ApprovalInboxActionRequest,
+    user: dict = runner,
+):
+    """Approve or reject a pending workflow request."""
+    run = _run_or_404(user, run_id)
+    if run["status"] not in {"awaiting-human", "awaiting-approval"}:
+        raise HTTPException(status_code=409, detail="This request is no longer pending")
+
+    if run["status"] == "awaiting-approval":
+        if not users_store.has_role(user, "maintainer"):
+            raise HTTPException(
+                status_code=403,
+                detail="Pull-request approvals require a maintainer or admin",
+            )
+        updated = decide_run_approval(
+            run_id,
+            ApprovalRequest(
+                decision=req.action,
+            ),
+            user,
+        )
+        return _approval_request_item(updated)
+
+    if req.action == "reject":
+        task = run.get("manual_task") or {}
+        try:
+            updated = runs_db.reject_manual_request(
+                run_id,
+                user["login"],
+                task.get("stage_key", ""),
+            )
+        except runs_db.ManualStageConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        audit_store.record(
+            user["login"],
+            "approval_request.reject",
+            f"Ticket {run['ticket_key']} · {task.get('stage_key', '')}",
+            run["app_id"],
+            {"run_id": run_id},
+        )
+        return _approval_request_item(updated)
+
+    updated = complete_manual_stage(
+        run_id,
+        ManualStageResultRequest(
+            action="approve_request",
+        ),
+        user,
+    )
+    return _approval_request_item(updated)
 
 
 @app.post("/api/runs/{run_id}/approval")
@@ -2956,7 +3370,7 @@ def decide_run_approval(run_id: str, req: ApprovalRequest, user: dict = maintain
         )
     run = _run_or_404(user, run_id)
     decision = "approved" if req.decision == "approve" else "rejected"
-    note = req.note.strip()[:500]
+    note = req.note.strip()
     if run["workflow_mode"] == "manual":
         updated = runs_db.resolve_manual_pr_approval(
             run_id,

@@ -82,11 +82,24 @@ Users can select a mode when starting a run:
   confirmation completes the run without another human click. Failed updates
   remain retryable, and a run-specific marker prevents duplicate completion
   comments on retry.
+  Manual-stage evidence and its stage-specific controls remain together in the
+  main content panel; there is no separate decision sidebar. The left-navigation
+  Approvals inbox lists pending Manual handoffs and pull-request approvals with
+  ticket, stage, persona, and reason. A reviewer can approve and continue
+  through the existing stage checks or reject and stop the run. Decisions are
+  recorded with the reviewer and time.
+  In Manual runs, users can override the eligible coding and verification
+  personas; automatic persona selection remains available. Stage-specific LLM
+  deployment fields are optional, and blank fields use the configured default.
+  A Manual run can be stopped from its Run page. The stop is persisted and the
+  run cannot advance to another stage.
+  History tooltips show the persona, model, and AI-versus-check execution
+  characteristics for coding and verification stages when recorded.
   Configure linting and type checks as part of the application's test command
   when they should run as required verification checks.
-  If the backend restarts during agent generation, validation, verification, or
-  PR creation or ticket update, the interrupted work is surfaced as a retryable
-  human task instead of remaining stuck.
+  If the backend restarts during agent generation, validation, verification,
+  persona review, PR creation, or ticket update, the interrupted work is
+  surfaced as a retryable human task instead of remaining stuck.
 
 Automatic mode remains the default for API and webhook-started runs. Configured
 per-app approval before PR publication remains available in either mode.
@@ -116,7 +129,8 @@ Create `.env` in the project root:
 AZURE_OPENAI_ENDPOINT="https://<your-endpoint>.cognitiveservices.azure.com/"
 AZURE_OPENAI_API_KEY=<your-key>
 AZURE_OPENAI_DEPLOYMENT="gpt-4.1-mini"
-# Optional per-stage deployment overrides (blank/unset uses AZURE_OPENAI_DEPLOYMENT)
+# Optional per-stage deployment overrides for Automatic/Assisted runs
+# Manual runs choose overrides in the Manual panel; blank uses AZURE_OPENAI_DEPLOYMENT.
 # AZURE_OPENAI_CLARITY_GATE_DEPLOYMENT="gpt-4.1-mini"
 # AZURE_OPENAI_CODING_DEPLOYMENT="your-coding-deployment"
 # AZURE_OPENAI_VERIFICATION_DEPLOYMENT="your-review-deployment"

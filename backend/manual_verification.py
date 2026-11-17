@@ -55,8 +55,15 @@ def verify_implementation(
     implementation: dict,
     on_event: Callable[[str, str, str | None], None] | None = None,
     on_usage: Callable[[str, int, int, float | None, int, int], None] | None = None,
+    persona_override: str = "",
+    cancel_check: Callable[[], bool] | None = None,
 ) -> dict:
     """Run configured checks and a read-only requirements review against a commit."""
+    def check_cancelled() -> None:
+        if cancel_check is not None and cancel_check():
+            raise RuntimeError("Run stopped by user")
+
+    check_cancelled()
     if not implementation.get("source") == "manual_agent":
         raise RuntimeError(
             "Manual verification requires saved agent implementation artifacts"
@@ -79,6 +86,7 @@ def verify_implementation(
         raise RuntimeError("The implementation workspace is unavailable") from exc
     if not repo_dir.is_dir():
         raise RuntimeError("The implementation workspace is unavailable")
+    check_cancelled()
     if _git(["rev-parse", "--abbrev-ref", "HEAD"], repo_dir) != branch:
         raise RuntimeError("The implementation workspace is not on the saved branch")
     if _git(["rev-parse", "HEAD"], repo_dir) != commit_sha:
@@ -101,6 +109,15 @@ def verify_implementation(
 
     verify_workspace = workspace / f"verification-{uuid.uuid4().hex}"
     checks: list[dict[str, str]] = []
+    def run_configured_shell(command: str) -> tuple[int | None, str]:
+        kwargs = {"cancel_check": cancel_check} if cancel_check is not None else {}
+        return run_shell(
+            command,
+            verify_workspace,
+            config.test_timeout_min * 60,
+            **kwargs,
+        )
+
     try:
         _git(
             ["worktree", "add", "--detach", str(verify_workspace), commit_sha], repo_dir
@@ -144,11 +161,8 @@ def verify_implementation(
                     on_event(
                         "in-progress", "Running configured verification setup", None
                     )
-                setup_rc, setup_output = run_shell(
-                    config.test_setup_command,
-                    verify_workspace,
-                    config.test_timeout_min * 60,
-                )
+                setup_rc, setup_output = run_configured_shell(config.test_setup_command)
+                check_cancelled()
                 if setup_rc == 0:
                     checks.append(
                         _check("Setup", "passed", "Configured test setup passed.")
@@ -175,11 +189,8 @@ def verify_implementation(
                         "in-progress", "Running configured verification tests", None
                     )
                 started = time.monotonic()
-                test_rc, test_output = run_shell(
-                    config.test_command,
-                    verify_workspace,
-                    config.test_timeout_min * 60,
-                )
+                test_rc, test_output = run_configured_shell(config.test_command)
+                check_cancelled()
                 elapsed = int(time.monotonic() - started)
                 if test_rc == 0:
                     checks.append(
@@ -248,11 +259,18 @@ def verify_implementation(
             except RuntimeError:
                 shutil.rmtree(verify_workspace, ignore_errors=True)
 
-    persona = skills_store.select_persona(
-        summary,
-        description,
-        stage="verify",
-        app_id=config.app_id,
+    check_cancelled()
+    eligible_personas = {
+        skill["slug"]
+        for skill in skills_store.list_skills(stage="verify", app_id=config.app_id)
+        if "error" not in skill
+    }
+    if persona_override and persona_override not in eligible_personas:
+        raise RuntimeError(
+            f"Selected verification persona {persona_override!r} is no longer enabled for this application"
+        )
+    persona = persona_override or skills_store.select_persona(
+        summary, description, stage="verify", app_id=config.app_id
     )
     variables = {
         "TICKET_KEY": requirements.get("ticket_key", ""),
@@ -323,7 +341,7 @@ def verify_implementation(
         api_key=SecretStr(config.azure_key),
         base_url=config.azure_url,
     )
-    response = _run_verification_agent(
+    reviewer_args = (
         llm,
         repo_dir,
         prompt,
@@ -331,7 +349,15 @@ def verify_implementation(
         if on_event and message
         else None,
         on_usage,
-    ).strip()
+    )
+    if cancel_check is None:
+        response = _run_verification_agent(*reviewer_args).strip()
+    else:
+        response = _run_verification_agent(
+            *reviewer_args,
+            cancel_check=cancel_check,
+        ).strip()
+    check_cancelled()
     first_line = next(
         (line.strip() for line in response.splitlines() if line.strip()), ""
     )
@@ -416,6 +442,8 @@ def verify_implementation(
     failure_reasons.extend(failed_checks)
     return {
         "decision": decision,
+        "persona": persona,
+        "model": config.verification_model,
         "reviewer_verdict": reviewer_verdict,
         "decision_reason": (
             " ".join(failure_reasons)

@@ -38,6 +38,17 @@ function personaName(run: RunRecord): string | null {
   return line.match(/\(persona:\s*([\w-]+)\)\s*$/)?.[1] ?? null;
 }
 
+function stageHoverDetails(run: RunRecord, stage: 'agent' | 'verify'): string {
+  const metadataLine = run.logs[stage]?.find((line) => line.includes('Stage details:')) ?? '';
+  const metadata = metadataLine.match(/Stage details:\s*(.*)$/)?.[1] ?? '';
+  const persona = metadata.match(/Persona=([^;]+)/)?.[1]?.trim() ?? 'not recorded';
+  const model = metadata.match(/Model=([^;]+)/)?.[1]?.trim() ?? 'not recorded';
+  const behavior = stage === 'agent'
+    ? 'AI code generation is non-deterministic. Test results are repeatable only when the tests and environment are deterministic.'
+    : 'AI review is non-deterministic. Configured checks are repeatable only when the checks and environment are deterministic.';
+  return `Persona: ${persona}\nLLM model: ${model}\nExecution: ${behavior}`;
+}
+
 function RunHistoryItem({
   run, selected, onSelect,
 }: { run: RunRecord; selected: boolean; onSelect: () => void }) {
@@ -156,7 +167,7 @@ function LogsContent() {
       <main className="content">
         <PageHeader
           eyebrow="Run history"
-          title="Logs"
+          title="History"
           description={`Review pipeline history and agent traces for ${activeApp?.name ?? 'the active application'}.`}
           actions={
             <button type="button" className="btn-secondary" onClick={() => void refreshRuns()}>
@@ -277,23 +288,34 @@ function LogsContent() {
                   </p>
                 )}
 
-                <ApprovalPanel run={selectedRun} onDecided={() => void refreshRuns()} />
+                <ApprovalPanel run={selectedRun} />
                 {selectedRun.status === 'awaiting-human' && selectedRun.workflow_mode === 'manual' && (
                   <div className="tip-box warn" style={{ marginBottom: 18 }}>
                     <b>Manual stage awaiting completion</b>
                     <p style={{ marginBottom: 10 }}>
                       {selectedRun.manual_task?.label ?? 'A workflow stage'} needs a human result before this run can continue.
                     </p>
-                    <button className="btn-secondary" onClick={() => router.push(`/run?manual_run=${encodeURIComponent(selectedRun.id)}`)}>
-                      Continue manual task
-                    </button>
                   </div>
                 )}
+                <p style={{ marginBottom: 18 }}>
+                  <button
+                    className="btn-secondary"
+                    onClick={() => router.push(`/run?run=${encodeURIComponent(selectedRun.id)}`)}
+                  >
+                    {selectedRun.status === 'awaiting-human' && selectedRun.workflow_mode === 'manual'
+                      ? 'Continue manual task'
+                      : 'Open run in pipeline'}
+                  </button>
+                </p>
 
                 <div style={{ marginBottom: 26 }}>
                   <StageProgress
                     stages={STEPS.map(({ key, label }) => ({ key, label }))}
                     states={stepStates}
+                    stageDetails={{
+                      agent: stageHoverDetails(selectedRun, 'agent'),
+                      verify: stageHoverDetails(selectedRun, 'verify'),
+                    }}
                   />
                 </div>
 
@@ -301,6 +323,10 @@ function LogsContent() {
                   steps={STEPS.map(({ key, label }) => ({ key, label }))}
                   states={stepStates}
                   logs={withoutAgentTrace(selectedRun.logs)}
+                  stageDetails={{
+                    agent: stageHoverDetails(selectedRun, 'agent'),
+                    verify: stageHoverDetails(selectedRun, 'verify'),
+                  }}
                 />
               </div>
             )}

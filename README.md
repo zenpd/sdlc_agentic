@@ -60,7 +60,11 @@ if you started the backend on a different port).
 - **Manual** keeps humans in control of stage decisions without making them
   write the implementation from scratch. Ticket assignment, clarity analysis,
   and the in-progress transition run automatically. If clarification is needed,
-  the gate asks specific questions and reruns after the human responds. Once the
+  the gate asks specific questions and reruns after the human responds. In the
+  Manual panel, users can select eligible coding and verification personas,
+  or leave persona selection automatic. They can also choose stage-specific
+  LLM deployments for the clarity gate, coding, and verification review; leaving
+  a model field blank uses the configured default. Once the
   ticket is clear, the coding agent loads the approved ticket, target branch,
   repository files, and repository coding instructions, then prepares a proposed
   change. A human can inspect and edit each proposed file, request an agent
@@ -86,6 +90,17 @@ if you started the backend on a different port).
   the configured final status when needed; and posts a completion comment. It
   confirms the status and comment with the ticket provider, displays generated
   evidence for human review, and only finishes after the human confirms.
+  Manual-stage evidence and its stage-specific controls stay together in the
+  main content panel; there is no separate decision sidebar.
+  History stage tooltips record the coding and verification persona, LLM model,
+  and which parts of those stages are AI-driven versus repeatable checks.
+  The left navigation includes an Approvals inbox for pending Manual handoffs
+  and pull-request approvals. It shows the ticket, stage, assigned persona, and
+  reason; reviewers can approve and continue through the existing stage
+  validation or reject and stop the run. Decisions are recorded with the
+  reviewer and time.
+  Active Manual runs can be stopped from the Run page; stopping is persisted and
+  prevents the run from advancing to later stages.
 
 ---
 

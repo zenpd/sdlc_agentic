@@ -93,8 +93,8 @@ function TicketCard({
           {running ? 'Running…' : run ? 'Re-run' : 'Run'}
         </button>
         {run && (
-          <Link href={run.status === 'awaiting-human' && run.workflow_mode === 'manual' ? `/run?manual_run=${encodeURIComponent(run.id)}` : `/logs?run=${run.id}`} style={{ fontSize: 12.5, color: 'var(--color-accent-purple)', textDecoration: 'none' }}>
-            {run.status === 'awaiting-human' && run.workflow_mode === 'manual' ? 'Continue manual task →' : 'View trace →'}
+          <Link href={`/run?run=${encodeURIComponent(run.id)}`} style={{ fontSize: 12.5, color: 'var(--color-accent-purple)', textDecoration: 'none' }}>
+            {run.status === 'awaiting-human' && run.workflow_mode === 'manual' ? 'Continue manual task →' : 'Open run →'}
           </Link>
         )}
         <div style={{ flex: 1 }} />

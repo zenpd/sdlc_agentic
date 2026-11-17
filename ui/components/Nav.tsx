@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
-import { getStats, logoutGithub, updatePreferences, type Role } from '@/lib/api';
+import { getApprovalRequests, getStats, logoutGithub, updatePreferences, type Role } from '@/lib/api';
 import { useActiveApp } from '@/components/AppContext';
 
 export const appInitials = (name: string) =>
@@ -13,6 +13,7 @@ const NAV_ITEMS: Array<{ label: string; href: string; icon: string; color: strin
   { label: 'Dashboard', href: '/', icon: 'home', color: '#7c3aed' },
   { label: 'Applications', href: '/applications', icon: 'github', color: '#0ea5e9' },
   { label: 'Run', href: '/run?new_run=1', icon: 'play', color: '#10b981' },
+  { label: 'Approvals', href: '/approvals', icon: 'approvals', color: '#7c3aed' },
   { label: 'Bulk Request', href: '/bulk', icon: 'tickets', color: '#f59e0b' },
   { label: 'History', href: '/logs', icon: 'file', color: '#3b82f6' },
   { label: 'Skills', href: '/skills', icon: 'award', color: '#ec4899' },
@@ -45,6 +46,8 @@ function NavIcon({ name }: { name: string }) {
       return <svg {...STROKE}><path d="M4 19V9M10 19V5M16 19v-7M22 19V3" /></svg>;
     case 'award':
       return <svg {...STROKE}><circle cx="12" cy="8" r="6" /><polyline points="8.21 13.89 7 23 12 20 17 23 15.79 13.88" /></svg>;
+    case 'approvals':
+      return <svg {...STROKE}><path d="M9 12l2 2 4-4" /><circle cx="12" cy="12" r="9" /></svg>;
     case 'activity':
       return <svg {...STROKE}><path d="M12 8v4l3 2" /><circle cx="12" cy="12" r="9" /></svg>;
     case 'teams':
@@ -72,6 +75,7 @@ export default function Nav() {
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const { apps, teamApps, teams, activeTeamId, setActiveTeamId, activeApp, activeAppId, setActiveAppId, me: githubUser, can } = useActiveApp();
   const [backendUp, setBackendUp] = useState<boolean | null>(null);
+  const [approvalCount, setApprovalCount] = useState<number | null>(null);
   const [query, setQuery] = useState('');
   const searchRef = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -102,6 +106,24 @@ export default function Nav() {
     const t = setInterval(load, 15000);
     return () => { cancelled = true; clearInterval(t); };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      getApprovalRequests(activeAppId)
+        .then((items) => {
+          if (cancelled) return;
+          setApprovalCount(items.length);
+        })
+      .catch(() => { if (!cancelled) setApprovalCount(null); });
+    };
+    load();
+    const timer = setInterval(load, 15000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [activeAppId]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -293,7 +315,12 @@ export default function Nav() {
               <span className="nav-icon" style={{ '--nav-color': color } as React.CSSProperties}>
                 <NavIcon name={icon} />
               </span>
-              {label}
+              <span className="nav-label">{label}</span>
+              {label === 'Approvals' && approvalCount !== null && approvalCount > 0 && (
+                <span className="nav-count-badge" aria-label={`${approvalCount} pending approvals`}>
+                  {approvalCount > 99 ? '99+' : approvalCount}
+                </span>
+              )}
             </Link>
           ))}
         </nav>

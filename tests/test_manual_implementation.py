@@ -85,6 +85,92 @@ def test_agent_reports_actionable_error_after_retry_also_makes_no_changes(
         )
 
 
+def test_generate_implementation_sets_up_agent_cancellation(
+    implementation_workspace,
+    monkeypatch,
+):
+    import openhands.sdk as sdk
+    from backend import implementation_evaluation
+
+    run_id, _workspace, repo, _source, config, task_data = implementation_workspace
+
+    class FakeConversation:
+        def __init__(self, **_kwargs):
+            pass
+
+        def pause(self):
+            pass
+
+    class FakeTool:
+        def __init__(self, name):
+            self.name = name
+
+    monkeypatch.setattr(sdk, "LLM", lambda **_kwargs: object())
+    monkeypatch.setattr(sdk, "Agent", lambda **_kwargs: object())
+    monkeypatch.setattr(sdk, "Conversation", FakeConversation)
+    monkeypatch.setattr(sdk, "Tool", FakeTool)
+    monkeypatch.setattr(
+        manual_implementation.skills_store,
+        "list_skills",
+        lambda **_kwargs: [{"slug": "backend-engineer"}],
+    )
+    monkeypatch.setattr(
+        manual_implementation.skills_store,
+        "select_persona",
+        lambda *_args, **_kwargs: "backend-engineer",
+    )
+    monkeypatch.setattr(
+        manual_implementation.skills_store,
+        "render_skill",
+        lambda *_args, **_kwargs: "persona instructions",
+    )
+    monkeypatch.setattr(
+        manual_implementation.skills_store, "detect_modifiers", lambda _repo: []
+    )
+    monkeypatch.setattr(
+        manual_implementation,
+        "_run_agent_for_review",
+        lambda *_args: (
+            "Implemented the ticket.",
+            {
+                "changed_files": ["src/app.py"],
+                "proposed_files": [
+                    {"path": "src/app.py", "content": "VALUE = 'agent'\n"}
+                ],
+                "proposed_patch": "diff",
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        manual_implementation,
+        "_make_agent_event_logger",
+        lambda _callback: lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        implementation_evaluation,
+        "evaluate_implementation",
+        lambda **_kwargs: {"score": 90},
+    )
+
+    result = manual_implementation.generate_implementation(
+        {"id": run_id, "ticket_key": "TICKET-1"},
+        config,
+        {
+            "gate": {
+                "result": {
+                    "summary": "Approved change",
+                    "description": "Implement it.",
+                }
+            }
+        },
+        task_data,
+    )
+
+    assert result["phase"] == "review"
+    assert result["branch"] == "feat/674-human-reviewed"
+    assert repo.is_dir()
+
+
 def result_or_raise(result):
     if isinstance(result, Exception):
         raise result

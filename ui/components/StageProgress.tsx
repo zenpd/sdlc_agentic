@@ -39,7 +39,15 @@ function StageIcon({ state }: { state: StageState }) {
   return null;
 }
 
-export default function StageProgress({ stages, states }: { stages: Stage[]; states: StageState[] }) {
+export default function StageProgress({
+  stages,
+  states,
+  stageDetails,
+}: {
+  stages: Stage[];
+  states: StageState[];
+  stageDetails?: Record<string, string>;
+}) {
   const n = stages.length;
   const colWidth = 100 / n;
 
@@ -100,6 +108,7 @@ export default function StageProgress({ stages, states }: { stages: Stage[]; sta
             return (
               <div
                 key={stage.key}
+                title={stageDetails?.[stage.key]}
                 style={{
                   flex: 1,
                   display: 'flex',
@@ -110,6 +119,7 @@ export default function StageProgress({ stages, states }: { stages: Stage[]; sta
                 }}
               >
                 <div
+                  title={stageDetails?.[stage.key]}
                   style={{
                     width: DOT,
                     height: DOT,

@@ -390,6 +390,7 @@ def _run_verification_agent(
     prompt: str,
     on_step: OnStep,
     on_usage: OnUsage | None = None,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> str:
     """Run a read-only verifier with no repository tools."""
     from openhands.sdk import Agent, Conversation
@@ -404,9 +405,23 @@ def _run_verification_agent(
         callbacks=[_make_agent_event_logger(on_step, step_key="verify")],
         max_iteration_per_run=12,
     )
+    stop_watcher = threading.Event()
+    stopped = threading.Event()
+
+    def watch_cancellation() -> None:
+        while not stop_watcher.wait(0.2):
+            if cancel_check is not None and cancel_check():
+                stopped.set()
+                conversation.pause()
+                return
+
+    watcher = threading.Thread(target=watch_cancellation, daemon=True)
+    watcher.start()
     try:
         conversation.send_message(prompt)
         conversation.run()
+        if stopped.is_set():
+            raise RuntimeError("Run stopped by user")
         response = get_agent_final_response(conversation.state.active_branch())
         if _verification_verdict(response) is None:
             # A good review that forgot its verdict line would otherwise stop
@@ -415,9 +430,13 @@ def _run_verification_agent(
             on_step("verify", "in-progress", "Reviewer gave no explicit verdict — asking it once more")
             conversation.send_message(VERDICT_REMINDER)
             conversation.run()
+            if stopped.is_set():
+                raise RuntimeError("Run stopped by user")
             response = get_agent_final_response(conversation.state.active_branch())
         return response
     finally:
+        stop_watcher.set()
+        watcher.join(timeout=1)
         if on_usage is not None:
             _report_usage(
                 on_usage,
@@ -567,12 +586,55 @@ def _make_agent_event_logger(on_step_fn: OnStep, step_key: str = "agent"):
 
 
 # ── Helpers ─────────────────────────────────────────────────────────
-def run_cmd(cmd: list[str], cwd: Path | None = None, silent: bool = False) -> tuple[int, str, str]:
+def run_cmd(
+    cmd: list[str],
+    cwd: Path | None = None,
+    silent: bool = False,
+    cancel_check: Callable[[], bool] | None = None,
+) -> tuple[int, str, str]:
     """Run a command, return (exit_code, stdout, stderr)."""
-    r = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
+    if cancel_check is None:
+        r = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
+        if not silent:
+            logger.debug(
+                "Pipeline subprocess completed", extra={"return_code": r.returncode}
+            )
+        return r.returncode, r.stdout, r.stderr
+
+    kwargs: dict = (
+        {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+        if os.name == "nt"
+        else {"start_new_session": True}
+    )
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=cwd,
+        **kwargs,
+    )
+    while True:
+        if cancel_check():
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                    capture_output=True,
+                )
+            else:
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
+            raise RuntimeError("Run stopped by user")
+        try:
+            stdout, stderr = proc.communicate(timeout=0.2)
+            break
+        except subprocess.TimeoutExpired:
+            continue
     if not silent:
-        logger.debug("Pipeline subprocess completed", extra={"return_code": r.returncode})
-    return r.returncode, r.stdout, r.stderr
+        logger.debug(
+            "Pipeline subprocess completed", extra={"return_code": proc.returncode}
+        )
+    return proc.returncode, stdout, stderr
 
 
 # Anything that looks like a credential is stripped from the environment the
@@ -584,7 +646,12 @@ def _safe_env() -> dict:
     return {k: v for k, v in os.environ.items() if not _SECRET_ENV_RE.search(k)}
 
 
-def run_shell(command: str, cwd: Path, timeout_sec: int) -> tuple[Optional[int], str]:
+def run_shell(
+    command: str,
+    cwd: Path,
+    timeout_sec: int,
+    cancel_check: Callable[[], bool] | None = None,
+) -> tuple[Optional[int], str]:
     """Run an app's setup/test command. Returns (exit code, combined output);
     exit code is None if it timed out, in which case the whole process tree
     is killed (a hung test runner must not outlive the pipeline)."""
@@ -593,9 +660,28 @@ def run_shell(command: str, cwd: Path, timeout_sec: int) -> tuple[Optional[int],
         command, shell=True, cwd=cwd, env=_safe_env(),
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", **kwargs,
     )
+    deadline = time.monotonic() + timeout_sec
+    while True:
+        if cancel_check is not None and cancel_check():
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                    capture_output=True,
+                )
+            else:
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
+            raise RuntimeError("Run stopped by user")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            out, _ = proc.communicate(timeout=min(0.2, remaining))
+            return proc.returncode, out or ""
+        except subprocess.TimeoutExpired:
+            continue
     try:
-        out, _ = proc.communicate(timeout=timeout_sec)
-        return proc.returncode, out or ""
+        out, _ = proc.communicate(timeout=0)
     except subprocess.TimeoutExpired:
         if os.name == "nt":
             subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)
@@ -603,6 +689,7 @@ def run_shell(command: str, cwd: Path, timeout_sec: int) -> tuple[Optional[int],
             os.killpg(proc.pid, signal.SIGKILL)
         out, _ = proc.communicate()
         return None, out or ""
+    return proc.returncode, out or ""
 
 
 # Hard cap on coding-agent steps (one LLM call each); a normal ticket uses 10-40.
@@ -1066,6 +1153,12 @@ def run_pipeline(
         app_id=cfg.app_id,
         **skill_vars,
     )
+    log_event(
+        "agent",
+        f"Stage details: Persona={persona}; Model={cfg.coding_model}; "
+        "AI coding is non-deterministic; configured test commands are repeatable "
+        "for the same code and environment",
+    )
 
     # Stack modifiers: look at the cloned repo (go.mod, tsconfig.json, ...) and
     # mix in short language notes on top of the persona. Purely a bonus - if
@@ -1386,7 +1479,12 @@ def run_pipeline(
         "review summary and list any blocking findings with file paths.\n\n"
         f"--- DIFF START ---\n{verification_diff}\n--- DIFF END ---"
     )
-    log_event("verify", f"Verification persona: {verify_persona}")
+    log_event(
+        "verify",
+        f"Stage details: Persona={verify_persona}; Model={cfg.verification_model}; "
+        "configured checks are repeatable for the same code and environment; "
+        "AI review is non-deterministic",
+    )
     try:
         verification_llm = LLM(
             model=cfg.verification_model,

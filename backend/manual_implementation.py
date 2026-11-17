@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import threading
 import time
 import uuid
 from pathlib import Path, PurePosixPath
@@ -61,8 +62,21 @@ def _repository_directory(run_id: str, config: PipelineConfig) -> tuple[Path, Pa
     return workspace, repo_dir
 
 
-def _run_checked(command: list[str], cwd: Path, action: str) -> str:
-    rc, stdout, stderr = run_cmd(command, cwd, silent=True)
+def _run_checked(
+    command: list[str],
+    cwd: Path,
+    action: str,
+    cancel_check: Callable[[], bool] | None = None,
+) -> str:
+    if cancel_check is None:
+        rc, stdout, stderr = run_cmd(command, cwd, silent=True)
+    else:
+        rc, stdout, stderr = run_cmd(
+            command,
+            cwd,
+            silent=True,
+            cancel_check=cancel_check,
+        )
     if rc != 0:
         raise RuntimeError(f"{action} failed: {(stderr or stdout).strip()[:500]}")
     return stdout.strip()
@@ -223,6 +237,7 @@ def generate_implementation(
     on_agent_event: Callable | None = None,
     on_usage: Callable | None = None,
     on_checkpoint: Callable | None = None,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> dict:
     """Clone or resume the run workspace and return a human-reviewable proposal."""
     workspace, repo_dir = _repository_directory(run["id"], config)
@@ -238,6 +253,7 @@ def generate_implementation(
             ["git", "clone", "--branch", config.target_branch, repo_url, str(repo_dir)],
             cwd=workspace,
             silent=True,
+            **({"cancel_check": cancel_check} if cancel_check is not None else {}),
         )
         if rc != 0:
             raise RuntimeError(
@@ -258,6 +274,7 @@ def generate_implementation(
             ],
             repo_dir,
             "Removing credentials from repository configuration",
+            cancel_check,
         )
         branch = task_data.get("branch")
         if not branch:
@@ -282,9 +299,13 @@ def generate_implementation(
             ["git", "checkout", "-b", branch],
             repo_dir,
             "Creating implementation branch",
+            cancel_check,
         )
         base_sha = _run_checked(
-            ["git", "rev-parse", "HEAD"], repo_dir, "Reading target branch"
+            ["git", "rev-parse", "HEAD"],
+            repo_dir,
+            "Reading target branch",
+            cancel_check,
         )
         task_data.update({"branch": branch, "base_sha": base_sha})
         if on_checkpoint is not None:
@@ -297,7 +318,10 @@ def generate_implementation(
                 "The saved implementation workspace is missing its branch checkpoint"
             )
         _run_checked(
-            ["git", "checkout", branch], repo_dir, "Resuming implementation branch"
+            ["git", "checkout", branch],
+            repo_dir,
+            "Resuming implementation branch",
+            cancel_check,
         )
 
     if (
@@ -305,10 +329,13 @@ def generate_implementation(
         and config.test_setup_command
         and not task_data.get("setup_complete")
     ):
+        if cancel_check is not None and cancel_check():
+            raise RuntimeError("Run stopped by user")
         rc, output = run_shell(
             config.test_setup_command,
             repo_dir,
             config.test_timeout_min * 60,
+            **({"cancel_check": cancel_check} if cancel_check is not None else {}),
         )
         if rc != 0:
             why = "timed out" if rc is None else f"exited with code {rc}"
@@ -335,16 +362,22 @@ def generate_implementation(
         )
         if "error" not in skill
     }
-    persona = (
-        config.default_persona
-        if config.default_persona in eligible_personas
-        else skills_store.select_persona(
-            summary,
-            description,
-            stage=pipeline_stage,
-            app_id=config.app_id,
+    persona = task_data.get("persona_overrides", {}).get("coding", "")
+    if persona and persona not in eligible_personas:
+        raise RuntimeError(
+            f"Selected coding persona {persona!r} is no longer enabled for this application"
         )
-    )
+    if not persona:
+        persona = (
+            config.default_persona
+            if config.default_persona in eligible_personas
+            else skills_store.select_persona(
+                summary,
+                description,
+                stage=pipeline_stage,
+                app_id=config.app_id,
+            )
+        )
     skill_vars = {
         "TICKET_KEY": run["ticket_key"],
         "TICKET_SUMMARY": summary,
@@ -421,17 +454,26 @@ def generate_implementation(
         max_iteration_per_run=AGENT_MAX_STEPS,
     )
     timed_out = False
+    stopped = threading.Event()
+    stop_watcher = threading.Event()
 
     def stop_agent() -> None:
         nonlocal timed_out
         timed_out = True
         conversation.pause()
 
-    import threading
+    def watch_cancellation() -> None:
+        while not stop_watcher.wait(0.2):
+            if cancel_check is not None and cancel_check():
+                stopped.set()
+                conversation.pause()
+                return
 
     timer = threading.Timer(config.agent_timeout_min * 60, stop_agent)
+    watcher = threading.Thread(target=watch_cancellation, daemon=True)
     try:
         timer.start()
+        watcher.start()
         agent_summary, snapshot = _run_agent_for_review(
             conversation,
             task_prompt,
@@ -440,8 +482,13 @@ def generate_implementation(
             get_agent_final_response,
             lambda: timed_out,
         )
+        if stopped.is_set():
+            raise RuntimeError("Run stopped by user")
     finally:
         timer.cancel()
+        stop_watcher.set()
+        if watcher.is_alive():
+            watcher.join(timeout=1)
         if on_usage is not None:
             _report_usage(
                 on_usage,
@@ -488,6 +535,8 @@ def generate_implementation(
         "agent_summary": redact(agent_summary[:4000], *secrets),
         "implementation_score": evaluation["score"],
         "implementation_evaluation": evaluation,
+        "coding_persona": persona,
+        "coding_model": config.coding_model,
         "branch": branch,
         "base_sha": base_sha,
         **snapshot,
@@ -589,8 +638,14 @@ def validate_and_commit(
     run_id: str,
     config: PipelineConfig,
     task_data: dict,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> dict:
     """Validate the reviewed working tree, then persist it as a local commit."""
+    def check_cancelled() -> None:
+        if cancel_check is not None and cancel_check():
+            raise RuntimeError("Run stopped by user")
+
+    check_cancelled()
     _workspace, repo_dir = _repository_directory(run_id, config)
     base_sha = task_data.get("base_sha")
     branch = task_data.get("branch")
@@ -640,13 +695,20 @@ def validate_and_commit(
 
     test_results = "No test command is configured; git diff --check passed."
     test_output = ""
+    def run_configured_shell(command: str) -> tuple[int | None, str]:
+        kwargs = {"cancel_check": cancel_check} if cancel_check is not None else {}
+        return run_shell(
+            command,
+            repo_dir,
+            config.test_timeout_min * 60,
+            **kwargs,
+        )
+
     if config.verify_mode == "command":
         if config.test_setup_command:
-            setup_rc, setup_output = run_shell(
-                config.test_setup_command,
-                repo_dir,
-                config.test_timeout_min * 60,
-            )
+            check_cancelled()
+            setup_rc, setup_output = run_configured_shell(config.test_setup_command)
+            check_cancelled()
             if setup_rc != 0:
                 why = (
                     "timed out" if setup_rc is None else f"exited with code {setup_rc}"
@@ -656,11 +718,9 @@ def validate_and_commit(
                     f"{_tail(setup_output)}"
                 )
         started = time.monotonic()
-        test_rc, test_output = run_shell(
-            config.test_command,
-            repo_dir,
-            config.test_timeout_min * 60,
-        )
+        check_cancelled()
+        test_rc, test_output = run_configured_shell(config.test_command)
+        check_cancelled()
         elapsed = int(time.monotonic() - started)
         if test_rc == PYTEST_NO_TESTS_EXIT and "pytest" in config.test_command:
             test_results = (
@@ -680,6 +740,7 @@ def validate_and_commit(
             "is opened."
         )
 
+    check_cancelled()
     after_checks = review_snapshot(repo_dir, base_sha)
     if (
         after_checks["changed_files"] != changed_files
@@ -690,6 +751,7 @@ def validate_and_commit(
             "changes and rerun validation before saving the implementation."
         )
 
+    check_cancelled()
     _run_checked(
         ["git", "config", "user.name", "SDLC Agent"],
         repo_dir,
@@ -719,6 +781,8 @@ def validate_and_commit(
     patch = _proposed_patch(repo_dir, base_sha)
     return {
         "summary": task_data.get("agent_summary") or summary,
+        "coding_persona": task_data.get("coding_persona", ""),
+        "coding_model": task_data.get("coding_model", config.coding_model),
         "branch": branch,
         "base_sha": base_sha,
         "commit_sha": commit_sha,

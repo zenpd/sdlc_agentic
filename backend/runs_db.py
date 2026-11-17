@@ -1,7 +1,7 @@
 import json
 import sqlite3
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -179,7 +179,6 @@ def init_db() -> None:
         SELECT id, manual_stage, manual_task_data, steps, logs
         FROM runs
         WHERE workflow_mode = 'manual' AND status = 'awaiting-human'
-          AND manual_stage IN ('agent', 'verify', 'pr', 'jira')
         """
     ).fetchall()
     for row in interrupted_manual_runs:
@@ -386,6 +385,7 @@ def complete_manual_stage(
                 raise ManualStageConflict(
                     "The pending manual stage changed; refresh the run and try again"
                 )
+            task_data = json.loads(row["manual_task_data"] or "{}")
 
             steps = json.loads(row["steps"])
             logs = json.loads(row["logs"])
@@ -402,7 +402,7 @@ def complete_manual_stage(
             results[stage_key] = {
                 "actor": actor,
                 "result": result,
-                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "completed_at": datetime.now(UTC).isoformat(),
             }
 
             for auto_stage, auto_result in automatic_results.items():
@@ -419,7 +419,7 @@ def complete_manual_stage(
                 results[auto_stage] = {
                     "actor": "system",
                     "result": auto_result,
-                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                    "completed_at": datetime.now(UTC).isoformat(),
                 }
 
             if stage_key in ("gate", "verify") and result.get("decision") in (
@@ -468,7 +468,7 @@ def complete_manual_stage(
                 started = datetime.fromisoformat(row["started_at"])
                 duration_sec = max(
                     0,
-                    int((datetime.now(timezone.utc) - started).total_seconds()),
+                    int((datetime.now(UTC) - started).total_seconds()),
                 )
             conn.execute(
                 """
@@ -579,8 +579,9 @@ def update_manual_task_data(
     expected_stage: str,
     task_data: dict,
     log_message: str,
-    step_state: str = "human",
+    step_state: str | None = "human",
     expected_phase: str | None = None,
+    allowed_run_statuses: tuple[str, ...] = ("awaiting-human",),
 ) -> dict:
     """Persist task data and its visible progress state without advancing the run."""
     with _lock:
@@ -595,7 +596,7 @@ def update_manual_task_data(
             if row is None:
                 raise KeyError(run_id)
             if (
-                row["status"] != "awaiting-human"
+                row["status"] not in allowed_run_statuses
                 or row["manual_stage"] != expected_stage
             ):
                 raise ManualStageConflict(
@@ -610,9 +611,10 @@ def update_manual_task_data(
                     "The implementation task changed; refresh and try again"
                 )
             steps = json.loads(row["steps"])
-            for step in steps:
-                if step["key"] == expected_stage:
-                    step["state"] = step_state
+            if step_state is not None:
+                for step in steps:
+                    if step["key"] == expected_stage:
+                        step["state"] = step_state
             logs = json.loads(row["logs"])
             logs.setdefault(expected_stage, []).append(
                 f"Task updated by @{actor}: {log_message}"
@@ -764,26 +766,96 @@ def resume_approved_run(run_id: str) -> bool:
 
 
 def request_cancel(run_id: str) -> bool:
-    """Request cooperative cancellation of an active automatic or hybrid run."""
+    """Stop an active run or request cooperative cancellation of a pipeline run."""
     with _lock:
         conn = _get_conn()
         try:
-            cur = conn.execute(
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
                 """
-                UPDATE runs
-                SET status = 'cancelling',
-                    approval_status = CASE
-                        WHEN approval_status = 'pending' THEN 'expired'
-                        ELSE approval_status
-                    END
-                WHERE id = ?
-                  AND workflow_mode IN ('automatic', 'hybrid')
-                  AND status IN ('in-progress', 'awaiting-approval')
+                SELECT status, workflow_mode, manual_stage, manual_task_data,
+                       approval_status, steps, logs, started_at
+                FROM runs WHERE id = ?
                 """,
                 (run_id,),
-            )
+            ).fetchone()
+            if row is None:
+                conn.rollback()
+                return False
+            status = row["status"]
+            if row["workflow_mode"] == "manual" and status in (
+                "awaiting-human",
+                "awaiting-approval",
+            ):
+                steps = json.loads(row["steps"])
+                logs = json.loads(row["logs"])
+                stage = row["manual_stage"]
+                for step in steps:
+                    if step["key"] == stage and step["state"] in (
+                        "in-progress",
+                        "human",
+                    ):
+                        step["state"] = "cancelled"
+                if stage:
+                    logs.setdefault(stage, []).append("Stopped by user")
+                logs.setdefault("run", []).append("Run stopped by user")
+                task_data = json.loads(row["manual_task_data"] or "{}")
+                task_data["phase"] = "cancelled"
+                duration = max(
+                    0,
+                    int(
+                        (
+                            datetime.now(UTC)
+                            - datetime.fromisoformat(row["started_at"])
+                        ).total_seconds()
+                    ),
+                )
+                cur = conn.execute(
+                    """
+                    UPDATE runs
+                    SET status = 'cancelled', manual_task_data = ?, steps = ?,
+                        logs = ?, duration_sec = ?,
+                        approval_status = CASE
+                            WHEN approval_status = 'pending' THEN 'expired'
+                            ELSE approval_status
+                        END,
+                        cost_status = CASE WHEN cost_status = 'pending'
+                                           THEN 'unavailable' ELSE cost_status END
+                    WHERE id = ? AND status = ?
+                    """,
+                    (
+                        json.dumps(task_data),
+                        json.dumps(steps),
+                        json.dumps(logs),
+                        duration,
+                        run_id,
+                        status,
+                    ),
+                )
+            elif (
+                row["workflow_mode"] in ("automatic", "hybrid")
+                and status in ("in-progress", "awaiting-approval")
+            ):
+                cur = conn.execute(
+                    """
+                    UPDATE runs
+                    SET status = 'cancelling',
+                        approval_status = CASE
+                            WHEN approval_status = 'pending' THEN 'expired'
+                            ELSE approval_status
+                        END
+                    WHERE id = ? AND status = ?
+                    """,
+                    (run_id, status),
+                )
+            else:
+                conn.rollback()
+                return False
             conn.commit()
             return cur.rowcount == 1
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -796,7 +868,7 @@ def request_approval(run_id: str) -> bool:
             "UPDATE runs SET status = 'awaiting-approval', approval_status = 'pending', "
             "approval_by = NULL, approval_note = NULL, approval_at = NULL, approval_requested_at = ? "
             "WHERE id = ? AND status = 'in-progress'",
-            (datetime.now(timezone.utc).isoformat(), run_id),
+            (datetime.now(UTC).isoformat(), run_id),
         )
         conn.commit()
         conn.close()
@@ -847,7 +919,7 @@ def request_manual_pr_approval(run_id: str) -> bool:
                 WHERE id = ?
                 """,
                 (
-                    datetime.now(timezone.utc).isoformat(),
+                    datetime.now(UTC).isoformat(),
                     json.dumps(steps),
                     json.dumps(logs),
                     json.dumps(task_data),
@@ -890,15 +962,17 @@ def resolve_manual_pr_approval(
             ):
                 return False
             status = "awaiting-human" if decision == "approved" else "human"
-            task_data = json.loads(
-                conn.execute(
-                    "SELECT manual_task_data FROM runs WHERE id = ?",
-                    (run_id,),
-                ).fetchone()["manual_task_data"]
-                or "{}"
-            )
             if decision == "approved":
+                task_data = json.loads(
+                    conn.execute(
+                        "SELECT manual_task_data FROM runs WHERE id = ?",
+                        (run_id,),
+                    ).fetchone()["manual_task_data"]
+                    or "{}"
+                )
                 task_data["phase"] = "creating"
+            else:
+                task_data = None
             steps = json.loads(row["steps"])
             for step in steps:
                 if step["key"] == "pr":
@@ -912,7 +986,7 @@ def resolve_manual_pr_approval(
                 started = datetime.fromisoformat(row["started_at"])
                 duration_sec = max(
                     0,
-                    int((datetime.now(timezone.utc) - started).total_seconds()),
+                    int((datetime.now(UTC) - started).total_seconds()),
                 )
             conn.execute(
                 """
@@ -920,7 +994,7 @@ def resolve_manual_pr_approval(
                 SET status = ?, approval_status = ?, approval_by = ?,
                     approval_note = ?, approval_at = ?, steps = ?, logs = ?,
                     duration_sec = COALESCE(?, duration_sec),
-                    manual_task_data = ?
+                    manual_task_data = COALESCE(?, manual_task_data)
                 WHERE id = ?
                 """,
                 (
@@ -928,11 +1002,11 @@ def resolve_manual_pr_approval(
                     decision,
                     actor,
                     note,
-                    datetime.now(timezone.utc).isoformat(),
+                    datetime.now(UTC).isoformat(),
                     json.dumps(steps),
                     json.dumps(logs),
                     duration_sec,
-                    json.dumps(task_data),
+                    json.dumps(task_data) if task_data is not None else None,
                     run_id,
                 ),
             )
@@ -952,14 +1026,44 @@ def decide_approval(run_id: str, decision: str, actor: str, note: str = "") -> b
         raise ValueError("decision must be approved, rejected or expired")
     with _lock:
         conn = _get_conn()
-        cur = conn.execute(
-            "UPDATE runs SET approval_status = ?, approval_by = ?, approval_note = ?, approval_at = ? "
-            "WHERE id = ? AND status = 'awaiting-approval' AND approval_status = 'pending'",
-            (decision, actor, note, datetime.now(timezone.utc).isoformat(), run_id),
-        )
-        conn.commit()
-        conn.close()
-        return cur.rowcount == 1
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT status, approval_status
+                FROM runs WHERE id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            if (
+                row is None
+                or row["status"] != "awaiting-approval"
+                or row["approval_status"] != "pending"
+            ):
+                conn.rollback()
+                return False
+            conn.execute(
+                """
+                UPDATE runs
+                SET approval_status = ?, approval_by = ?, approval_note = ?,
+                    approval_at = ?
+                WHERE id = ?
+                """,
+                (
+                    decision,
+                    actor,
+                    note,
+                    datetime.now(UTC).isoformat(),
+                    run_id,
+                ),
+            )
+            conn.commit()
+            return True
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
 
 def finish_run(
@@ -1081,7 +1185,7 @@ def record_usage(
                 """,
                 (
                     run_id,
-                    datetime.now(timezone.utc).isoformat(),
+                    datetime.now(UTC).isoformat(),
                     prompt_tokens,
                     completion_tokens,
                     cost_usd,
@@ -1195,6 +1299,88 @@ def get_runs(
     return [_row_to_dict(r) for r in rows]
 
 
+def get_approval_runs(
+    app_id: str | None = None,
+    app_ids: set | None = None,
+    limit: int = 250,
+) -> list[dict]:
+    """Return runs with a pending human stage or pull-request approval."""
+    where, params = _scope(app_id, app_ids)
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM runs
+            WHERE (
+                (status = 'awaiting-approval' AND approval_status = 'pending')
+                OR (
+                    workflow_mode = 'manual'
+                    AND status = 'awaiting-human'
+                    AND COALESCE(json_extract(manual_task_data, '$.phase'), '') NOT IN (
+                        'generating', 'validating', 'applying', 'verifying',
+                        'creating', 'updating'
+                    )
+                )
+            ){where}
+            ORDER BY started_at DESC LIMIT ?
+            """,
+            (*params, limit),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [_row_to_dict(row) for row in rows]
+
+
+def reject_manual_request(
+    run_id: str,
+    actor: str,
+    expected_stage: str,
+) -> dict:
+    """Stop a pending Manual run after a reviewer rejects its request."""
+    with _lock:
+        conn = _get_conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT status, manual_stage, steps, logs FROM runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(run_id)
+            if (
+                row["status"] != "awaiting-human"
+                or row["manual_stage"] != expected_stage
+            ):
+                raise ManualStageConflict(
+                    "The pending approval request changed; refresh and try again"
+                )
+            steps = json.loads(row["steps"])
+            for step in steps:
+                if step["key"] == expected_stage:
+                    step["state"] = "failed"
+            logs = json.loads(row["logs"])
+            logs.setdefault(expected_stage, []).append(
+                f"Request rejected by @{actor}; run stopped"
+            )
+            conn.execute(
+                "UPDATE runs SET status = 'failed', steps = ?, logs = ?, "
+                "duration_sec = COALESCE(duration_sec, "
+                "CAST((julianday('now') - julianday(started_at)) * 86400 AS INTEGER)) "
+                "WHERE id = ? AND status = 'awaiting-human'",
+                (json.dumps(steps), json.dumps(logs), run_id),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+    updated = get_run(run_id)
+    if updated is None:
+        raise KeyError(run_id)
+    return updated
+
+
 def get_stats(app_id: Optional[str] = None, app_ids: Optional[set] = None) -> dict:
     where, params = _scope(app_id, app_ids)
     conn = _get_conn()
@@ -1220,7 +1406,7 @@ def get_stats(app_id: Optional[str] = None, app_ids: Optional[set] = None) -> di
     ).fetchone()
     avg_duration_sec = int(avg_row["a"]) if avg_row["a"] is not None else None
 
-    current_month = datetime.now(timezone.utc).strftime("%Y-%m")
+    current_month = datetime.now(UTC).strftime("%Y-%m")
     monthly_usage = conn.execute(
         f"""
         SELECT
@@ -1249,7 +1435,7 @@ def get_stats(app_id: Optional[str] = None, app_ids: Optional[set] = None) -> di
     ).fetchone()
 
     daily = []
-    today = datetime.now(timezone.utc).date()
+    today = datetime.now(UTC).date()
     for i in range(6, -1, -1):
         day = today - timedelta(days=i)
         row = conn.execute(

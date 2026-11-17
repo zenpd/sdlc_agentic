@@ -31,6 +31,8 @@ export type ManualVerificationCheck = {
 };
 export type ManualVerificationReport = {
   decision: 'pass' | 'fail' | string;
+  persona?: string;
+  model?: string;
   reviewer_verdict: 'PASS' | 'FAIL' | 'INCOMPLETE' | string;
   decision_reason: string;
   summary: string;
@@ -87,6 +89,10 @@ export type ManualTask = {
   questions: string[];
   analysis: string;
   attempts: Array<Record<string, unknown>>;
+  model_overrides?: Record<string, string>;
+  persona_overrides?: Record<string, string>;
+  coding_persona?: string;
+  coding_model?: string;
   context: Record<string, Record<string, string>>;
   phase: string;
   branch: string;
@@ -108,7 +114,6 @@ export type ManualTask = {
 
 export function manualTaskNeedsHumanAction(task: ManualTask | null | undefined): boolean {
   if (!task) return false;
-
   switch (task.stage_key) {
     case 'agent':
       return ['review', 'validation_failed', 'failed'].includes(task.phase);
@@ -122,6 +127,12 @@ export function manualTaskNeedsHumanAction(task: ManualTask | null | undefined):
         task.phase,
       );
   }
+}
+
+export function manualTaskIsActive(task: ManualTask | null | undefined): boolean {
+  return Boolean(task && (
+    ['generating', 'validating', 'applying', 'verifying', 'creating', 'updating'].includes(task.phase)
+  ));
 }
 
 // Set when the run's application requires sign-off before a PR opens.
@@ -172,6 +183,17 @@ export type RunStats = {
   daily: Array<{ date: string; success: number; failed: number }>;
 };
 
+export type ApprovalInboxItem = {
+  id: string;
+  run: RunRecord;
+  kind: 'manual_stage' | 'pull_request';
+  stage_key: string;
+  stage_label: string;
+  persona: string;
+  reason: string;
+  requested_at: string;
+};
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, init);
   if (!res.ok) {
@@ -203,6 +225,21 @@ export function getRuns(appId?: string, opts: { mine?: boolean } = {}): Promise<
   return request<RunRecord[]>(`/api/runs${qs ? `?${qs}` : ''}`);
 }
 
+export function getApprovalRequests(appId?: string): Promise<ApprovalInboxItem[]> {
+  return request<ApprovalInboxItem[]>(`/api/approvals${appQuery(appId)}`);
+}
+
+export function actOnApprovalRequest(
+  runId: string,
+  action: 'approve' | 'reject',
+): Promise<ApprovalInboxItem> {
+  return request<ApprovalInboxItem>(`/api/approvals/${encodeURIComponent(runId)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action }),
+  });
+}
+
 export function decideApproval(runId: string, decision: 'approve' | 'reject', note = ''): Promise<RunRecord> {
   return request<RunRecord>(`/api/runs/${encodeURIComponent(runId)}/approval`, {
     method: 'POST',
@@ -232,7 +269,7 @@ export function runTicket(ticketKey: string, appId?: string, mode: WorkflowMode 
 export function completeManualStage(
   runId: string,
   submission: {
-    action?: 'submit' | 'request_changes' | 'apply_edits' | 'accept_implementation'
+    action?: 'submit' | 'approve_request' | 'request_changes' | 'apply_edits' | 'accept_implementation'
       | 'skip_high_confidence_review'
       | 'accept_verification' | 'request_verification_fixes'
       | 'flag_verification_concern' | 'submit_manual_verification'
@@ -241,6 +278,8 @@ export function completeManualStage(
     result?: Record<string, string>;
     files?: Record<string, string | null>;
     feedback?: string;
+    model_overrides?: Record<string, string>;
+    persona_overrides?: Record<string, string>;
   },
 ): Promise<RunRecord> {
   return request<RunRecord>(`/api/runs/${encodeURIComponent(runId)}/manual-stage`, {
@@ -392,9 +431,6 @@ export type IntegrationConfig = {
   TARGET_BRANCH: string;
   AZURE_OPENAI_ENDPOINT: string;
   AZURE_OPENAI_DEPLOYMENT: string;
-  AZURE_OPENAI_CLARITY_GATE_DEPLOYMENT: string;
-  AZURE_OPENAI_CODING_DEPLOYMENT: string;
-  AZURE_OPENAI_VERIFICATION_DEPLOYMENT: string;
   STATUS_DONE: string;
   STATUS_IN_PROGRESS: string;
   STATUS_FAILED: string;

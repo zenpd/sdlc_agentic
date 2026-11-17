@@ -1,3 +1,4 @@
+import sys
 import threading
 import time
 
@@ -5,7 +6,7 @@ import pytest
 from conftest import client, sign_in
 
 from backend import api_server, apps_store, runs_db
-from backend.jira_bot import PipelineConfig
+from backend.jira_bot import PipelineConfig, run_cmd
 
 
 def _wait_until(predicate, timeout=5):
@@ -71,6 +72,59 @@ def test_stop_request_interrupts_pipeline_at_next_stage_checkpoint(
     stopped = runs_db.get_run(run_id)
     assert stopped["status"] == "cancelled"
     assert stopped["steps"][0]["state"] == "cancelled"
+
+
+def test_manual_run_can_be_stopped_and_persisted(active_run):
+    _run_id, app, _config = active_run
+    run_id = "manual-cancellable-run"
+    runs_db.create_run(
+        run_id,
+        "CANCEL-2",
+        "2026-10-26T10:00:00+00:00",
+        app["id"],
+        triggered_by="run-stopper",
+        workflow_mode="manual",
+    )
+    task_data = runs_db.get_manual_task_data(run_id)
+    task_data.update({"phase": "generating"})
+    runs_db.update_manual_task_data(
+        run_id,
+        "run-stopper",
+        "fetch",
+        task_data,
+        "Starting implementation",
+        step_state="in-progress",
+    )
+
+    response = client.post(f"/api/runs/{run_id}/cancel")
+
+    assert response.status_code == 200, response.text
+    stopped = response.json()
+    assert stopped["status"] == "cancelled"
+    assert stopped["manual_task"]["phase"] == "cancelled"
+    assert stopped["steps"][0]["state"] == "cancelled"
+    assert runs_db.get_run(run_id)["status"] == "cancelled"
+    with pytest.raises(runs_db.ManualStageConflict):
+        runs_db.update_manual_task_data(
+            run_id,
+            "run-stopper",
+            "fetch",
+            task_data,
+            "Must not continue after cancellation",
+            expected_phase="generating",
+        )
+
+
+def test_cancellable_command_stops_its_child_process():
+    started_at = time.monotonic()
+
+    with pytest.raises(RuntimeError, match="Run stopped by user"):
+        run_cmd(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            cancel_check=lambda: time.monotonic() - started_at > 0.1,
+        )
+
+    assert time.monotonic() - started_at < 5
 
 
 def test_queued_run_can_be_cancelled_without_starting_pipeline(active_run, monkeypatch):

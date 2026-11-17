@@ -19,6 +19,7 @@ type ListProps = {
   steps: Step[];
   states: StepState[];
   logs?: Record<string, string[]>;
+  stageDetails?: Record<string, string>;
 };
 
 // props for use in sidebar / mini tracker (index-based)
@@ -30,7 +31,14 @@ export default function StepTracker(props: ListProps | IndexProps) {
   if ('current' in props) {
     return <IndexTracker current={props.current} />;
   }
-  return <ListTracker steps={props.steps} states={props.states} logs={props.logs} />;
+  return (
+    <ListTracker
+      steps={props.steps}
+      states={props.states}
+      logs={props.logs}
+      stageDetails={props.stageDetails}
+    />
+  );
 }
 
 function IndexTracker({ current }: { current: number }) {
@@ -66,7 +74,7 @@ function LogLine({ text, type }: { text: string; type?: string }) {
   return <div className={`log-line-dash ${cls}`} style={style}>{text}</div>;
 }
 
-function ListTracker({ steps, states, logs }: ListProps) {
+function ListTracker({ steps, states, logs, stageDetails }: ListProps) {
   return (
     <div className="steps">
       {steps.map(({ key, label }, i) => {
@@ -84,7 +92,12 @@ function ListTracker({ steps, states, logs }: ListProps) {
 
         return (
           <div key={key}>
-            <div className={`step-item-dash ${state} ${isActive ? 'active' : ''}`} style={{ opacity: s === 'pending' ? 0.45 : 1 }}>
+            <div
+              className={`step-item-dash ${state} ${isActive ? 'active' : ''}`}
+              style={{ opacity: s === 'pending' ? 0.45 : 1 }}
+              title={stageDetails?.[key]}
+              aria-label={stageDetails?.[key] ? `${label}. ${stageDetails[key]}` : label}
+            >
               <div className="step-dot" style={dotBg}>
                 {s === 'success' ? (
                   <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">

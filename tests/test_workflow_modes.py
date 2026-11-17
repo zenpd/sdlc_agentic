@@ -5,9 +5,238 @@ from uuid import uuid4
 import pytest
 from conftest import client, sign_in
 
-from backend import api_server, apps_store, runs_db
+from backend import api_server, apps_store, audit_store, runs_db
 from backend.jira_bot import PipelineConfig
 from backend.runs_db import ManualStageConflict
+
+
+def test_persona_escalation_actions_are_no_longer_supported(
+    mock_manual_ticket_fetch,
+):
+    del mock_manual_ticket_fetch
+    sign_in("admin")
+    run_id = client.post(
+        "/api/run-ticket",
+        json={"ticket_key": "704", "mode": "manual"},
+    ).json()["run_id"]
+    manual_escalation = client.post(
+        f"/api/runs/{run_id}/manual-stage",
+        json={
+            "action": "escalate",
+            "target_persona": "reviewer",
+            "escalation_reason": "Please review this request.",
+        },
+    )
+    inbox_escalation = client.post(
+        f"/api/approvals/{run_id}",
+        json={
+            "action": "escalate",
+            "reason": "Please review this request.",
+            "target_persona": "reviewer",
+        },
+    )
+    assert manual_escalation.status_code == 422
+    assert inbox_escalation.status_code == 422
+
+
+def test_approval_inbox_rejection_stops_manual_run_and_records_actor(
+    mock_manual_ticket_fetch,
+):
+    del mock_manual_ticket_fetch
+    sign_in("admin")
+    sign_in("reviewer", "runner")
+    run_id = client.post(
+        "/api/run-ticket",
+        json={"ticket_key": "707", "mode": "manual"},
+    ).json()["run_id"]
+    rejected = client.post(
+        f"/api/approvals/{run_id}",
+        json={"action": "reject"},
+    )
+    assert rejected.status_code == 200, rejected.text
+    assert rejected.json()["run"]["status"] == "failed"
+    assert "run stopped" in rejected.json()["run"]["logs"]["fetch"][-1]
+    audit = next(
+        item for item in audit_store.list_entries()
+        if item["action"] == "approval_request.reject"
+    )
+    assert audit["actor"] == "reviewer"
+    assert audit["details"]["run_id"] == run_id
+
+
+def test_approval_inbox_omits_automated_manual_phases(mock_manual_ticket_fetch):
+    del mock_manual_ticket_fetch
+    sign_in("admin")
+    run_id = client.post(
+        "/api/run-ticket",
+        json={"ticket_key": "709", "mode": "manual"},
+    ).json()["run_id"]
+    task_data = runs_db.get_manual_task_data(run_id)
+    run = runs_db.get_run(run_id)
+    task_data["phase"] = "generating"
+    runs_db.update_manual_task_data(
+        run_id,
+        "admin",
+        run["manual_task"]["stage_key"],
+        task_data,
+        "Manual stage generation started",
+        expected_phase=None,
+    )
+
+    inbox = client.get("/api/approvals?app_id=default")
+    assert inbox.status_code == 200
+    assert inbox.json() == []
+
+
+def test_manual_model_choices_are_applied_and_carried_to_following_stages(
+    mock_manual_ticket_fetch,
+    mock_manual_ticket_operations,
+    monkeypatch,
+):
+    del mock_manual_ticket_fetch, mock_manual_ticket_operations
+    sign_in("admin")
+    sign_in("developer", "runner")
+    clarity_models = []
+    analyses = iter([False, True])
+
+    def analyze(config, _ticket_key, _values):
+        clarity_models.append(config.clarity_gate_model)
+        clear = next(analyses)
+        return {
+            "clear": clear,
+            "reason": "Ticket is clear." if clear else "More detail is needed.",
+            "questions": [] if clear else ["What behavior is expected?"],
+            "suggested_summary": "Implement behavior",
+            "suggested_description": "Approved behavior details.",
+        }
+
+    monkeypatch.setattr(api_server, "_analyze_manual_clarity", analyze)
+    coding_persona = next(
+        skill["slug"]
+        for skill in api_server.skills_store.list_skills(stage="code", app_id="default")
+        if "error" not in skill
+    )
+    verification_persona = next(
+        skill["slug"]
+        for skill in api_server.skills_store.list_skills(stage="verify", app_id="default")
+        if "error" not in skill
+    )
+    run_id = client.post(
+        "/api/run-ticket",
+        json={"ticket_key": "704", "mode": "manual"},
+    ).json()["run_id"]
+
+    unclear = client.post(
+        f"/api/runs/{run_id}/manual-stage",
+        json={
+            "result": {
+                "summary": "Implement behavior",
+                "description": "Approved behavior details.",
+            },
+            "model_overrides": {
+                "clarity_gate": "clarity-one",
+                "coding": "coding-one",
+            },
+            "persona_overrides": {
+                "coding": coding_persona,
+                "verification": verification_persona,
+            },
+        },
+    )
+    assert unclear.status_code == 200, unclear.text
+    gate_task = unclear.json()["manual_task"]
+    assert gate_task["stage_key"] == "gate"
+    assert gate_task["model_overrides"] == {
+        "clarity_gate": "clarity-one",
+        "coding": "coding-one",
+    }
+    assert gate_task["persona_overrides"] == {
+        "coding": coding_persona,
+        "verification": verification_persona,
+    }
+
+    gate_values = gate_task["initial_values"]
+    approved = client.post(
+        f"/api/runs/{run_id}/manual-stage",
+        json={
+            "result": {
+                **gate_values,
+                "relevant_context": "The ticket and repository are in scope.",
+                "answers": "The expected behavior is defined.",
+            },
+            "model_overrides": {
+                "clarity_gate": "clarity-two",
+                "coding": "coding-two",
+            },
+            "persona_overrides": {
+                "coding": coding_persona,
+                "verification": verification_persona,
+            },
+        },
+    )
+    assert approved.status_code == 200, approved.text
+    agent_task = approved.json()["manual_task"]
+    assert agent_task["stage_key"] == "agent"
+    assert agent_task["model_overrides"] == {
+        "clarity_gate": "clarity-two",
+        "coding": "coding-two",
+    }
+    assert agent_task["persona_overrides"] == {
+        "coding": coding_persona,
+        "verification": verification_persona,
+    }
+    assert clarity_models == ["azure/clarity-one", "azure/clarity-two"]
+
+
+def test_manual_model_choices_reject_invalid_deployment_names():
+    with pytest.raises(ValueError, match="deployment name is invalid"):
+        api_server._update_manual_model_overrides(
+            {},
+            {"coding": "not a valid deployment"},
+        )
+
+
+def test_manual_persona_choices_must_be_enabled_for_their_stage(monkeypatch):
+    monkeypatch.setattr(
+        api_server.skills_store,
+        "list_skills",
+        lambda stage, app_id: (
+            [{"slug": "backend-engineer"}]
+            if stage == "code"
+            else [{"slug": "qa-test-engineer"}]
+        ),
+    )
+    assert api_server._update_manual_persona_overrides(
+        {},
+        {"coding": "backend-engineer", "verification": "qa-test-engineer"},
+        "default",
+    ) == {
+        "coding": "backend-engineer",
+        "verification": "qa-test-engineer",
+    }
+    with pytest.raises(ValueError, match="not enabled"):
+        api_server._update_manual_persona_overrides(
+            {},
+            {"coding": "qa-test-engineer"},
+            "default",
+        )
+
+
+def test_manual_model_defaults_use_the_configured_default_deployment():
+    config = PipelineConfig(
+        azure_deployment="default-deployment",
+        clarity_gate_deployment="legacy-clarity",
+        coding_deployment="legacy-coding",
+        verification_deployment="legacy-verification",
+    )
+
+    defaults = api_server._manual_model_config(config, {})
+    assert defaults.clarity_gate_model == "azure/default-deployment"
+    assert defaults.coding_model == "azure/default-deployment"
+    assert defaults.verification_model == "azure/default-deployment"
+
+    selected = api_server._manual_model_config(config, {"verification": "reviewer"})
+    assert selected.verification_model == "azure/reviewer"
 
 
 @pytest.fixture
@@ -1002,6 +1231,11 @@ def test_manual_verification_waits_for_configured_pr_approval(
     mock_manual_ticket_operations,
     mock_manual_implementation,
 ):
+    del (
+        mock_manual_ticket_fetch,
+        mock_manual_ticket_operations,
+        mock_manual_implementation,
+    )
     sign_in("admin")
     sign_in("developer", "runner")
     apps_store.update_app_config("default", {"REQUIRE_PR_APPROVAL": "true"})
@@ -1039,13 +1273,17 @@ def test_manual_verification_waits_for_configured_pr_approval(
 
     sign_in("admin")
     approved = client.post(
-        f"/api/runs/{run_id}/approval",
-        json={"decision": "approve", "note": "Verification report reviewed."},
+        f"/api/approvals/{run_id}",
+        json={
+            "action": "approve",
+            "reason": "The verified change is ready for PR creation.",
+        },
     )
     assert approved.status_code == 200, approved.text
-    assert approved.json()["status"] == "awaiting-human"
-    assert approved.json()["manual_task"]["stage_key"] == "pr"
-    assert approved.json()["approval"]["status"] == "approved"
+    assert approved.json()["run"]["status"] == "awaiting-human"
+    assert approved.json()["run"]["manual_task"]["stage_key"] == "pr"
+    assert approved.json()["run"]["approval"]["status"] == "approved"
+    assert "escalation" not in approved.json()["run"]["manual_task"]
 
 
 def test_manual_pr_failure_is_retryable_and_fallback_requires_provider_confirmation(

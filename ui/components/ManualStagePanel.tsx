@@ -1,7 +1,13 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { completeManualStage, manualTaskNeedsHumanAction, type RunRecord } from '@/lib/api';
+import {
+  completeManualStage,
+  listSkills,
+  manualTaskNeedsHumanAction,
+  type RunRecord,
+  type SkillSummary,
+} from '@/lib/api';
 import ReviewCodeEditor from '@/components/ReviewCodeEditor';
 
 type InlineReviewComment = {
@@ -10,6 +16,35 @@ type InlineReviewComment = {
   selectedText: string;
   text: string;
 };
+
+type ManualModelStage = 'clarity_gate' | 'coding' | 'verification';
+type ManualPersonaStage = 'coding' | 'verification';
+
+function ModelChoiceField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="label-main">
+      {label}
+      <input
+        className="input-main"
+        aria-label={label}
+        autoComplete="off"
+        maxLength={128}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder="Default LLM"
+      />
+      <span className="field-hint">Leave blank to use the default LLM.</span>
+    </label>
+  );
+}
 
 export default function ManualStagePanel({
   run,
@@ -20,6 +55,19 @@ export default function ManualStagePanel({
 }) {
   const task = run.manual_task;
   const [values, setValues] = useState<Record<string, string>>({});
+  const [modelOverrides, setModelOverrides] = useState<Record<ManualModelStage, string>>({
+    clarity_gate: '',
+    coding: '',
+    verification: '',
+  });
+  const [personaOverrides, setPersonaOverrides] = useState<Record<ManualPersonaStage, string>>({
+    coding: '',
+    verification: '',
+  });
+  const [personaOptions, setPersonaOptions] = useState<Record<ManualPersonaStage, SkillSummary[]>>({
+    coding: [],
+    verification: [],
+  });
   const [files, setFiles] = useState<Record<string, string | null>>({});
   const [selectedFile, setSelectedFile] = useState('');
   const [selectedLine, setSelectedLine] = useState(1);
@@ -40,6 +88,15 @@ export default function ManualStagePanel({
         task?.initial_values[field.name] ?? '',
       ]),
     ));
+    setModelOverrides({
+      clarity_gate: task?.model_overrides?.clarity_gate ?? '',
+      coding: task?.model_overrides?.coding ?? '',
+      verification: task?.model_overrides?.verification ?? '',
+    });
+    setPersonaOverrides({
+      coding: task?.persona_overrides?.coding ?? '',
+      verification: task?.persona_overrides?.verification ?? '',
+    });
     setFiles(Object.fromEntries(
       (task?.proposed_files ?? []).map((file) => [
         file.path,
@@ -57,10 +114,56 @@ export default function ManualStagePanel({
     setError(null);
   }, [task?.stage_key, task?.attempts.length, task?.phase]);
 
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([
+      listSkills('code', run.app_id),
+      listSkills('verify', run.app_id),
+    ]).then(([coding, verification]) => {
+      if (cancelled) return;
+      setPersonaOptions({
+        coding: coding.filter((skill) => !skill.error),
+        verification: verification.filter((skill) => !skill.error),
+      });
+    }).catch((e: unknown) => {
+      if (!cancelled) {
+        setError(e instanceof Error ? e.message : 'Could not load eligible personas.');
+      }
+    });
+    return () => { cancelled = true; };
+  }, [run.app_id]);
+
+  const personaSelector = (stage: ManualPersonaStage, label: string) => (
+    <label className="label-main stage-config-field">
+      {label}
+      <select
+        className="input-main"
+        value={personaOverrides[stage]}
+        onChange={(event) => setPersonaOverrides((current) => ({
+          ...current,
+          [stage]: event.target.value,
+        }))}
+      >
+        <option value="">Automatic selection</option>
+        {personaOptions[stage].map((persona) => (
+          <option key={persona.slug} value={persona.slug}>
+            {persona.name || persona.slug} · {persona.slug}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+
   if (
     !task
-    || run.status !== 'awaiting-human'
-    || !manualTaskNeedsHumanAction(task)
+    || (
+      run.status !== 'awaiting-human'
+      && !(run.status === 'awaiting-approval' && run.workflow_mode === 'manual')
+    )
+    || (
+      run.status !== 'awaiting-approval'
+      && !manualTaskNeedsHumanAction(task)
+    )
   ) return null;
   const finalDiff = task.context.agent?.diff ?? '';
   const activeFile = task.proposed_files.find((file) => file.path === selectedFile)
@@ -134,13 +237,44 @@ export default function ManualStagePanel({
     && implementationScore >= confidenceThreshold
     && !hasCriticalEvaluationFailure
   );
+  const personaLabel = (stage: ManualPersonaStage) => {
+    const slug = personaOverrides[stage];
+    if (!slug) {
+      return stage === 'coding'
+        ? task.coding_persona || 'Automatic'
+        : task.report?.persona || 'Automatic';
+    }
+    const selected = personaOptions[stage].find((persona) => persona.slug === slug);
+    return selected?.name || slug;
+  };
+  const modelLabel = (stage: ManualModelStage) => {
+    if (modelOverrides[stage]) return modelOverrides[stage];
+    if (stage === 'coding' && task.coding_model) return task.coding_model;
+    if (stage === 'verification' && task.report?.model) return task.report.model;
+    return 'Configured default';
+  };
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     setBusy(true);
     setError(null);
     try {
-      onCompleted(await completeManualStage(run.id, { result: values }));
+      onCompleted(await completeManualStage(run.id, {
+        result: values,
+        model_overrides: task?.stage_key === 'fetch' || task?.stage_key === 'gate'
+          ? {
+            clarity_gate: modelOverrides.clarity_gate,
+            coding: modelOverrides.coding,
+            verification: modelOverrides.verification,
+          }
+          : undefined,
+        persona_overrides: task?.stage_key === 'fetch' || task?.stage_key === 'gate'
+          ? {
+            coding: personaOverrides.coding,
+            verification: personaOverrides.verification,
+          }
+          : undefined,
+      }));
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not submit the stage result.');
     } finally {
@@ -168,6 +302,19 @@ export default function ManualStagePanel({
             )).join('\n')}`
             : '',
         ].filter(Boolean).join('\n\n') : undefined,
+        model_overrides: action === 'request_changes'
+          ? {
+            coding: modelOverrides.coding,
+            verification: modelOverrides.verification,
+          }
+          : action === 'accept_implementation' || action === 'skip_high_confidence_review'
+            ? { verification: modelOverrides.verification }
+            : undefined,
+        persona_overrides: action === 'request_changes'
+          ? personaOverrides
+          : action === 'accept_implementation' || action === 'skip_high_confidence_review'
+            ? { verification: personaOverrides.verification }
+            : undefined,
       }));
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not submit the implementation review.');
@@ -208,6 +355,19 @@ export default function ManualStagePanel({
       onCompleted(await completeManualStage(run.id, {
         action,
         feedback: evidence ?? (feedback.trim() || undefined),
+        model_overrides: action === 'retry_verification'
+          ? { verification: modelOverrides.verification }
+          : action === 'request_verification_fixes'
+            ? {
+              coding: modelOverrides.coding,
+              verification: modelOverrides.verification,
+            }
+            : undefined,
+        persona_overrides: action === 'retry_verification'
+          ? { verification: personaOverrides.verification }
+          : action === 'request_verification_fixes'
+            ? { coding: personaOverrides.coding }
+            : undefined,
       }));
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not submit the verification decision.');
@@ -229,7 +389,7 @@ export default function ManualStagePanel({
   };
 
   return (
-    <form onSubmit={submit} className="card-main" style={{ padding: 22, marginBottom: 20, borderColor: '#d97706' }}>
+    <form id="manual-stage-form" onSubmit={submit} className="card-main" style={{ padding: 22, marginBottom: 0, borderColor: '#d97706' }}>
       <div className="eyebrow">
         <span aria-hidden="true" style={{ marginRight: 6, fontSize: 14 }}>
           👤
@@ -237,14 +397,78 @@ export default function ManualStagePanel({
         Human action needed · {task.label}
       </div>
       <h3 style={{ marginBottom: 8 }}>{task.label}</h3>
+      {['fetch', 'gate', 'agent', 'verify'].includes(task.stage_key) && (
+        <details className="stage-config-panel">
+          <summary>
+            <span>
+              <strong>AI stage settings</strong>
+              <small>
+                Coding: {personaLabel('coding')} · {modelLabel('coding')}
+                {' · '}Verification: {personaLabel('verification')} · {modelLabel('verification')}
+                {(task.stage_key === 'fetch' || task.stage_key === 'gate')
+                  ? ` · Clarity: ${modelLabel('clarity_gate')}`
+                  : ''}
+              </small>
+            </span>
+            <span className="stage-config-action">Configure</span>
+          </summary>
+          <div className="stage-config-grid">
+            {(task.stage_key === 'fetch' || task.stage_key === 'gate') && (
+              <div className="stage-config-group">
+                <h4>Clarity gate</h4>
+                <ModelChoiceField
+                  label="LLM model"
+                  value={modelOverrides.clarity_gate}
+                  onChange={(value) => setModelOverrides((current) => ({ ...current, clarity_gate: value }))}
+                />
+              </div>
+            )}
+            {(task.stage_key === 'fetch' || task.stage_key === 'gate' || task.stage_key === 'agent') && (
+              <div className="stage-config-group">
+                <h4>Agent coding and testing</h4>
+                {personaSelector('coding', 'Persona')}
+                <ModelChoiceField
+                  label="LLM model"
+                  value={modelOverrides.coding}
+                  onChange={(value) => setModelOverrides((current) => ({ ...current, coding: value }))}
+                />
+              </div>
+            )}
+            {(task.stage_key === 'fetch' || task.stage_key === 'gate' || task.stage_key === 'agent' || task.stage_key === 'verify') && (
+              <div className="stage-config-group">
+                <h4>Verification review</h4>
+                {personaSelector('verification', 'Persona')}
+                <ModelChoiceField
+                  label="LLM model"
+                  value={modelOverrides.verification}
+                  onChange={(value) => setModelOverrides((current) => ({ ...current, verification: value }))}
+                />
+              </div>
+            )}
+          </div>
+          <p className="stage-config-note">
+            {task.stage_key === 'agent'
+              ? 'The coding choice applies if you request a code revision; the verification choice applies when you accept the implementation.'
+              : task.stage_key === 'verify'
+                ? 'The verification choice applies when you rerun verification; the coding choice applies if you request implementation fixes.'
+                : 'These choices apply to the upcoming coding and verification stages.'}
+            {' '}Automatic selection uses the project’s eligible personas. Blank model fields use the configured default.
+          </p>
+        </details>
+      )}
       {task.stage_key === 'gate' && (
         <p style={{ color: 'var(--color-text-secondary)', fontSize: 13, lineHeight: 1.5, marginBottom: 16 }}>
           {task.instructions}
         </p>
       )}
       {task.stage_key === 'agent' && (
+        task.phase === 'applying'
+        || task.phase === 'validating'
+        || task.phase === 'failed'
+        || task.phase === 'validation_failed'
+        || (task.phase === 'review' && Boolean(task.error))
+      ) && (
         <div className="tip-box" style={{ marginBottom: 16 }}>
-          {task.phase === 'generating' && <strong>The coding agent is loading the repository and preparing a proposal…</strong>}
           {task.phase === 'applying' && <strong>Applying your edits to the implementation workspace…</strong>}
           {task.phase === 'validating' && <strong>Validating the final edited code and running configured checks…</strong>}
           {task.phase === 'review' && task.error && (
@@ -280,42 +504,12 @@ export default function ManualStagePanel({
           )}
         </div>
       )}
-      {task.stage_key === 'verify' && (
+      {task.stage_key === 'verify' && (task.phase === 'failed' || task.report) && (
         <div className="tip-box" style={{ marginBottom: 18 }}>
-          {task.phase === 'verifying' && (
-            <strong>Running independent verification against the approved ticket and implementation…</strong>
-          )}
           {task.phase === 'failed' && (
             <div className="alert error">
               <strong>Verification could not complete.</strong>
               {task.error && <pre style={{ whiteSpace: 'pre-wrap', marginBottom: 8 }}>{task.error}</pre>}
-              <button
-                className="btn-secondary"
-                type="button"
-                disabled={busy}
-                onClick={() => submitVerification('retry_verification')}
-              >
-                {busy ? 'Retrying…' : 'Retry verification'}
-              </button>
-              <label className="label-main" style={{ marginTop: 10 }}>
-                Concern (optional; required to stop the workflow)
-                <textarea
-                  className="input-main"
-                  rows={3}
-                  maxLength={3000}
-                  value={feedback}
-                  onChange={(event) => setFeedback(event.target.value)}
-                  placeholder="Explain why this verification issue needs human investigation."
-                />
-              </label>
-              <button
-                className="btn-secondary"
-                type="button"
-                disabled={busy || !feedback.trim()}
-                onClick={() => submitVerification('flag_verification_concern')}
-              >
-                Flag concern and stop workflow
-              </button>
             </div>
           )}
           {task.report && (
@@ -355,85 +549,11 @@ export default function ManualStagePanel({
                   </button>
                 )}
               </details>
-              {task.phase === 'review' && (
-                <>
-                  <button
-                    className="btn-secondary"
-                    type="button"
-                    disabled={busy}
-                    onClick={() => submitVerification('retry_verification')}
-                  >
-                    {busy ? 'Running verification…' : 'Run verification again'}
-                  </button>
-                  {task.report.decision === 'fail' && (
-                    <div className="alert error">
-                      The automated report did not pass. Review the findings and check
-                      outputs below. You can request fixes, flag a concern, or perform
-                      and document an independent manual verification.
-                    </div>
-                  )}
-                  <label className="label-main" style={{ marginTop: 14 }}>
-                    Manual verification evidence
-                    <textarea
-                      className="input-main"
-                      rows={4}
-                      maxLength={3000}
-                      value={verificationEvidence}
-                      onChange={(event) => setVerificationEvidence(event.target.value)}
-                      placeholder="Describe the checks you personally performed, the results, and how they cover the approved requirements."
-                    />
-                  </label>
-                  <button
-                    className="btn-secondary"
-                    type="button"
-                    disabled={busy || verificationEvidence.trim().length < 30}
-                    onClick={() => submitVerification(
-                      'submit_manual_verification',
-                      verificationEvidence.trim(),
-                    )}
-                  >
-                    {busy ? 'Submitting…' : 'Submit my verification and continue'}
-                  </button>
-                  <label className="label-main" style={{ marginTop: 14 }}>
-                    Fix request or concern (optional for acceptance; required otherwise)
-                    <textarea
-                      className="input-main"
-                      rows={3}
-                      maxLength={3000}
-                      value={feedback}
-                      onChange={(event) => setFeedback(event.target.value)}
-                      placeholder="Describe implementation fixes or a concern for the audit record."
-                    />
-                  </label>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
-                    {task.report.decision === 'pass' && (
-                      <button
-                        className="btn-primary"
-                        type="button"
-                        disabled={busy}
-                        onClick={() => submitVerification('accept_verification')}
-                      >
-                        {busy ? 'Submitting…' : 'Accept report and continue to PR'}
-                      </button>
-                    )}
-                    <button
-                      className="btn-secondary"
-                      type="button"
-                      disabled={busy || !feedback.trim()}
-                      onClick={() => submitVerification('request_verification_fixes')}
-                    >
-                      Request implementation fixes
-                    </button>
-                    <button
-                      className="btn-secondary"
-                      type="button"
-                      disabled={busy || !feedback.trim()}
-                      onClick={() => submitVerification('flag_verification_concern')}
-                    >
-                      Flag concern and stop workflow
-                    </button>
-                  </div>
-                </>
+              {task.phase === 'review' && task.report.decision === 'fail' && (
+                <p className="alert error">
+                  The automated report did not pass. Review its findings in the
+                  decision panel before choosing a next action.
+                </p>
               )}
             </>
           )}
@@ -452,24 +572,6 @@ export default function ManualStagePanel({
               <div className="alert error" style={{ marginBottom: 12 }}>
                 <strong>Pull request creation failed.</strong>
                 {task.error && <pre style={{ whiteSpace: 'pre-wrap', marginBottom: 8 }}>{task.error}</pre>}
-              </div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
-                <button
-                  className="btn-secondary"
-                  type="button"
-                  disabled={busy}
-                  onClick={() => submitVerification('retry_pr_creation')}
-                >
-                  {busy ? 'Retrying…' : 'Retry'}
-                </button>
-                <button
-                  className="btn-secondary"
-                  type="button"
-                  disabled={busy}
-                  onClick={() => setPrFallback((current) => !current)}
-                >
-                  {prFallback ? 'Hide manual fallback' : 'Use manual fallback'}
-                </button>
               </div>
             </>
           )}
@@ -490,9 +592,6 @@ export default function ManualStagePanel({
                   />
                 </label>
               ))}
-              <button className="btn-primary" type="submit" disabled={busy}>
-                {busy ? 'Verifying…' : 'Validate and continue'}
-              </button>
             </div>
           )}
         </div>
@@ -506,14 +605,6 @@ export default function ManualStagePanel({
             <div className="alert error" style={{ marginBottom: 12 }}>
               <strong>The automatic ticket update could not be confirmed.</strong>
               {task.error && <pre style={{ whiteSpace: 'pre-wrap', marginBottom: 8 }}>{task.error}</pre>}
-              <button
-                className="btn-secondary"
-                type="button"
-                disabled={busy}
-                onClick={() => submitVerification('retry_ticket_update')}
-              >
-                {busy ? 'Retrying…' : 'Retry ticket update'}
-              </button>
             </div>
           )}
         </div>
@@ -603,15 +694,17 @@ export default function ManualStagePanel({
                       </button>
                     ))}
                   </div>
-                  <button
-                    className="btn-primary review-apply-button"
-                    type="button"
-                    disabled={busy || !hasUnappliedEdits}
-                    onClick={() => submitImplementation('apply_edits')}
-                    title="Save your editor changes to the implementation workspace without starting validation."
-                  >
-                    {busyAction === 'apply_edits' ? 'Applying…' : 'Apply'}
-                  </button>
+                  {(task.phase === 'review' || task.phase === 'validation_failed') && (
+                    <button
+                      className="btn-primary review-apply-button"
+                      type="button"
+                      disabled={busy || !hasUnappliedEdits}
+                      onClick={() => submitImplementation('apply_edits')}
+                      title="Save code edits without running validation."
+                    >
+                      {busyAction === 'apply_edits' ? 'Applying…' : 'Apply'}
+                    </button>
+                  )}
                 </div>
                 {activeFile && (
                   <>
@@ -710,75 +803,12 @@ export default function ManualStagePanel({
                   </>
                 )}
               </section>
-              <label className="label-main">
-                Ask the coding agent for changes
-                <textarea
-                  className="input-main"
-                  rows={3}
-                  maxLength={3000}
-                  value={feedback}
-                  onChange={(event) => setFeedback(event.target.value)}
-                  placeholder="Describe what the agent should change or fix."
-                />
-              </label>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
-                <button
-                  className="btn-secondary"
-                  type="button"
-                  disabled={busy || !feedback.trim()}
-                  onClick={() => submitImplementation('request_changes')}
-                >
-                  {busy ? 'Sending…' : 'Request agent changes'}
-                </button>
-                <button
-                  className="btn-primary"
-                  type="button"
-                  disabled={busy}
-                  onClick={() => submitImplementation('accept_implementation')}
-                >
-                  {busy
-                    ? 'Submitting…'
-                    : task.phase === 'validation_failed'
-                      ? 'Save edits and revalidate'
-                      : 'Accept code and validate'}
-                </button>
-                {task.phase === 'review' && highConfidence && (
-                  <button
-                    className="btn-secondary"
-                    type="button"
-                    disabled={busy}
-                    onClick={() => submitImplementation('skip_high_confidence_review')}
-                  >
-                    {busy ? 'Starting validation…' : 'Skip code review and validate'}
-                  </button>
-                )}
-              </div>
             </>
           ) : null}
         </div>
       )}
       {task.stage_key === 'agent' && task.phase === 'failed' && task.proposed_files.length === 0 && (
-        <div style={{ marginBottom: 18 }}>
-          <label className="label-main">
-            Retry instructions for the coding agent
-            <textarea
-              className="input-main"
-              rows={3}
-              maxLength={3000}
-              value={feedback}
-              onChange={(event) => setFeedback(event.target.value)}
-              placeholder="For example, retry loading the repository and preparing the implementation."
-            />
-          </label>
-          <button
-            className="btn-secondary"
-            type="button"
-            disabled={busy || !feedback.trim()}
-            onClick={() => submitImplementation('request_changes')}
-          >
-            {busy ? 'Retrying…' : 'Retry coding agent'}
-          </button>
-        </div>
+        <p className="alert error">Use the actions below to retry the coding agent.</p>
       )}
       {task.stage_key !== 'agent' && task.stage_key !== 'pr' && task.stage_key !== 'jira' && task.fields.map((field) => (
         <label key={field.name} className="label-main" style={{ marginBottom: 12 }}>
@@ -813,18 +843,141 @@ export default function ManualStagePanel({
           )}
         </label>
       ))}
-      {error && <div className="alert error">{error}</div>}
-      {task.stage_key !== 'agent'
-        && task.stage_key !== 'verify'
-        && task.stage_key !== 'pr'
-        && task.stage_key !== 'jira'
-        && <button className="btn-primary" type="submit" disabled={busy}>
-        {busy
-          ? task.stage_key === 'gate' ? 'Checking clarity…' : 'Submitting…'
-          : task.stage_key === 'gate'
-            ? 'Submit and check clarity'
-            : 'Submit and continue'}
-      </button>}
+      <div className="manual-action-stack">
+        {run.status === 'awaiting-human' && <section className="manual-action-card">
+          <h4>{task.label} actions</h4>
+          {task.stage_key === 'fetch' || task.stage_key === 'gate' ? (
+            <>
+              <button className="btn-primary" type="submit" form="manual-stage-form" disabled={busy}>
+                {busy ? task.stage_key === 'gate' ? 'Checking clarity…' : 'Submitting…' : task.stage_key === 'gate' ? 'Submit and check clarity' : 'Submit and continue'}
+              </button>
+            </>
+          ) : null}
+          {task.stage_key === 'assign' || task.stage_key === 'in_progress' ? (
+            <button className="btn-primary" type="submit" form="manual-stage-form" disabled={busy}>
+              {busy ? 'Submitting…' : 'Submit and continue'}
+            </button>
+          ) : null}
+          {task.stage_key === 'agent' && task.proposed_files.length > 0 && (
+            <>
+              <label className="label-main">
+                Ask the coding agent for changes
+                <textarea className="input-main" rows={3} maxLength={3000} value={feedback} onChange={(event) => setFeedback(event.target.value)} />
+              </label>
+              <button className="btn-secondary" type="button" disabled={busy || !feedback.trim()} onClick={() => submitImplementation('request_changes')}>
+                {busyAction === 'request_changes' ? 'Sending…' : 'Request agent changes'}
+              </button>
+              <button className="btn-primary" type="button" disabled={busy} onClick={() => submitImplementation('accept_implementation')}>
+                {busy ? 'Submitting…' : task.phase === 'validation_failed' ? 'Save edits and revalidate' : 'Accept code and validate'}
+              </button>
+              {task.phase === 'review' && highConfidence && (
+                <button className="btn-secondary" type="button" disabled={busy} onClick={() => submitImplementation('skip_high_confidence_review')}>
+                  {busy ? 'Starting validation…' : 'Skip code review and validate'}
+                </button>
+              )}
+            </>
+          )}
+          {task.stage_key === 'agent' && task.phase === 'failed' && task.proposed_files.length === 0 && (
+            <>
+              <label className="label-main">
+                Retry instructions for the coding agent
+                <textarea className="input-main" rows={3} maxLength={3000} value={feedback} onChange={(event) => setFeedback(event.target.value)} />
+              </label>
+              <button className="btn-secondary" type="button" disabled={busy || !feedback.trim()} onClick={() => submitImplementation('request_changes')}>
+                {busy ? 'Retrying…' : 'Retry coding agent'}
+              </button>
+            </>
+          )}
+          {task.stage_key === 'verify' && (
+            <>
+              {task.phase === 'review' && (
+                <>
+                  <button className="btn-secondary" type="button" disabled={busy} onClick={() => submitVerification('retry_verification')}>
+                    {busy ? 'Running verification…' : 'Run verification again'}
+                  </button>
+                  {task.report?.decision === 'fail' && (
+                    <p className="alert error">The automated report did not pass. Review findings before deciding.</p>
+                  )}
+                  <label className="label-main">
+                    Manual verification evidence
+                    <textarea className="input-main" rows={4} maxLength={3000} value={verificationEvidence} onChange={(event) => setVerificationEvidence(event.target.value)} />
+                  </label>
+                  <button className="btn-secondary" type="button" disabled={busy || verificationEvidence.trim().length < 30} onClick={() => submitVerification('submit_manual_verification', verificationEvidence.trim())}>
+                    {busy ? 'Submitting…' : 'Submit my verification and continue'}
+                  </button>
+                  <label className="label-main">
+                    Fix request or concern
+                    <textarea className="input-main" rows={3} maxLength={3000} value={feedback} onChange={(event) => setFeedback(event.target.value)} />
+                  </label>
+                  {task.report?.decision === 'pass' && (
+                    <button className="btn-primary" type="button" disabled={busy} onClick={() => submitVerification('accept_verification')}>
+                      {busy ? 'Submitting…' : 'Accept report and continue to PR'}
+                    </button>
+                  )}
+                  <button className="btn-secondary" type="button" disabled={busy || !feedback.trim()} onClick={() => submitVerification('request_verification_fixes')}>
+                    Request implementation fixes
+                  </button>
+                  <button className="btn-secondary" type="button" disabled={busy || !feedback.trim()} onClick={() => submitVerification('flag_verification_concern')}>
+                    Flag concern and stop workflow
+                  </button>
+                </>
+              )}
+              {task.phase === 'failed' && (
+                <>
+                  {task.error && <p className="alert error">{task.error}</p>}
+                  <button className="btn-secondary" type="button" disabled={busy} onClick={() => submitVerification('retry_verification')}>
+                    {busy ? 'Retrying…' : 'Retry verification'}
+                  </button>
+                  <label className="label-main">
+                    Concern (required to stop the workflow)
+                    <textarea
+                      className="input-main"
+                      rows={3}
+                      maxLength={3000}
+                      value={feedback}
+                      onChange={(event) => setFeedback(event.target.value)}
+                      placeholder="Explain why this verification issue needs human investigation."
+                    />
+                  </label>
+                  <button
+                    className="btn-secondary"
+                    type="button"
+                    disabled={busy || !feedback.trim()}
+                    onClick={() => submitVerification('flag_verification_concern')}
+                  >
+                    Flag concern and stop workflow
+                  </button>
+                </>
+              )}
+            </>
+          )}
+          {task.stage_key === 'pr' && task.phase === 'failed' && (
+            <>
+              {task.error && <p className="alert error">{task.error}</p>}
+              <button className="btn-secondary" type="button" disabled={busy} onClick={() => submitVerification('retry_pr_creation')}>
+                {busy ? 'Retrying…' : 'Retry pull request'}
+              </button>
+              <button className="btn-secondary" type="button" disabled={busy} onClick={() => setPrFallback((current) => !current)}>
+                {prFallback ? 'Hide manual fallback' : 'Use manual fallback'}
+              </button>
+              {prFallback && (
+                <button className="btn-primary" type="submit" form="manual-stage-form" disabled={busy}>
+                  {busy ? 'Verifying…' : 'Validate and continue'}
+                </button>
+              )}
+            </>
+          )}
+          {task.stage_key === 'jira' && task.phase === 'failed' && (
+            <>
+              {task.error && <p className="alert error">{task.error}</p>}
+              <button className="btn-secondary" type="button" disabled={busy} onClick={() => submitVerification('retry_ticket_update')}>
+                {busy ? 'Retrying…' : 'Retry ticket update'}
+              </button>
+            </>
+          )}
+          {error && <div className="alert error">{error}</div>}
+        </section>}
+      </div>
     </form>
   );
 }

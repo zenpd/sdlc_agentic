@@ -1,12 +1,13 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { Suspense, useState, useRef, useEffect, useCallback } from 'react';
+import { useSearchParams } from 'next/navigation';
 import Nav from '@/components/Nav';
 import PageHeader from '@/components/PageHeader';
 import StepTracker from '@/components/StepTracker';
 import StatusBadge from '@/components/StatusBadge';
 import StageProgress from '@/components/StageProgress';
-import { runTicket, cancelRun, getRunStatus, getRuns, describeDuration, formatDuration, withoutAgentTrace, manualTaskNeedsHumanAction, type RunRecord, type StepInfo, type WorkflowMode } from '@/lib/api';
+import { runTicket, cancelRun, getRunStatus, describeDuration, formatDuration, withoutAgentTrace, manualTaskIsActive, manualTaskNeedsHumanAction, type RunRecord, type StepInfo, type WorkflowMode } from '@/lib/api';
 import { useActiveApp } from '@/components/AppContext';
 import ApprovalPanel from '@/components/ApprovalPanel';
 import ManualStagePanel from '@/components/ManualStagePanel';
@@ -97,7 +98,9 @@ function Confetti() {
   );
 }
 
-export default function RunPage() {
+function RunContent() {
+  const searchParams = useSearchParams();
+  const searchQuery = searchParams.toString();
   const [ticketKey, setTicketKey]   = useState('');
   const [workflowMode, setWorkflowMode] = useState<WorkflowMode>('automatic');
   const [runId, setRunId]           = useState<string | null>(null);
@@ -119,14 +122,12 @@ export default function RunPage() {
   const timerRef      = useRef<ReturnType<typeof setInterval> | null>(null);
   const startTimeRef  = useRef<number | null>(null);
   const pollingRunIdRef = useRef<string | null>(null);
-  const skipManualResumeRef = useRef(false);
 
   const stopTimer = useCallback(() => {
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
   }, []);
 
   const clearForNewRun = useCallback(() => {
-    skipManualResumeRef.current = true;
     if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
     pollingRunIdRef.current = null;
     stopTimer();
@@ -165,9 +166,7 @@ export default function RunPage() {
           setRunning(false);
           stopTimer();
         } else if (r.status === 'awaiting-human') {
-          const implementationRunning = ['generating', 'validating', 'applying', 'verifying', 'creating', 'updating'].includes(
-            r.manual_task?.phase ?? '',
-          );
+          const implementationRunning = manualTaskIsActive(r.manual_task);
           setRunning(implementationRunning);
           if (!implementationRunning) {
             if (intervalRef.current) {
@@ -200,10 +199,6 @@ export default function RunPage() {
   }, []);
 
   useEffect(() => {
-    skipManualResumeRef.current = false;
-  }, [activeAppId]);
-
-  useEffect(() => {
     const handleNewRun = () => {
       window.history.replaceState(null, '', '/run');
       clearForNewRun();
@@ -214,31 +209,16 @@ export default function RunPage() {
 
   useEffect(() => {
     let cancelled = false;
-    const searchParams = new URLSearchParams(window.location.search);
-    if (searchParams.get('new_run') === '1') {
+    const params = new URLSearchParams(searchQuery);
+    if (params.get('new_run') === '1') {
       window.history.replaceState(null, '', '/run');
       clearForNewRun();
       return () => { cancelled = true; };
     }
-    if (skipManualResumeRef.current) return;
-    const requestedRunId = searchParams.get('manual_run');
-    if (requestedRunId) window.history.replaceState(null, '', '/run');
-    const loadingRuns = requestedRunId
-      ? getRunStatus(requestedRunId).then((run) => [run])
-      : getRuns(activeAppId);
-    loadingRuns.then((runs) => {
-      if (cancelled || skipManualResumeRef.current || runId) return;
-      const pending = runs.find((run) => (
-        run.app_id === activeAppId
-        && (
-          (run.workflow_mode === 'manual' && run.status === 'awaiting-human')
-          || (
-            run.workflow_mode !== 'manual'
-            && ['in-progress', 'cancelling', 'awaiting-approval'].includes(run.status)
-          )
-        )
-      ));
-      if (!pending) return;
+    const requestedRunId = params.get('run') ?? params.get('manual_run');
+    if (!requestedRunId || requestedRunId === runId) return () => { cancelled = true; };
+    getRunStatus(requestedRunId).then((pending) => {
+      if (cancelled) return;
       setRunId(pending.id);
       setTicketKey(pending.ticket_key);
       setWorkflowMode(pending.workflow_mode === 'manual' ? 'manual' : 'automatic');
@@ -249,23 +229,23 @@ export default function RunPage() {
       setPrUrl(pending.pr_url);
       setDuration(pending.duration_sec);
       setRunning(
-        pending.workflow_mode !== 'manual'
-        || ['generating', 'validating', 'applying', 'verifying', 'creating', 'updating'].includes(
-          pending.manual_task?.phase ?? '',
+        ['in-progress', 'cancelling', 'awaiting-approval'].includes(pending.status)
+        || (
+          pending.status === 'awaiting-human'
+          && manualTaskIsActive(pending.manual_task)
         ),
       );
       startPolling(pending.id);
     }).catch((loadError: unknown) => {
       if (!cancelled) {
-        setError(loadError instanceof Error ? loadError.message : 'Could not load manual run details.');
+        setError(loadError instanceof Error ? loadError.message : 'Could not load the requested run details.');
       }
     });
     return () => { cancelled = true; };
-  }, [activeAppId, runId, startPolling, clearForNewRun]);
+  }, [searchQuery, runId, startPolling, clearForNewRun]);
 
   const handleRun = async () => {
     if (!ticketKey.trim()) return;
-    skipManualResumeRef.current = true;
     window.history.replaceState(null, '', '/run');
     if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
     pollingRunIdRef.current = null;
@@ -293,7 +273,13 @@ export default function RunPage() {
       setStatus(updated.status);
       setStepStates(updated.steps.map((step) => step.state));
       setLogs(updated.logs);
+      setDuration(updated.duration_sec);
       if (updated.status === 'cancelled') {
+        if (intervalRef.current) {
+          clearInterval(intervalRef.current);
+          intervalRef.current = null;
+        }
+        pollingRunIdRef.current = null;
         setRunning(false);
         stopTimer();
       } else {
@@ -308,13 +294,38 @@ export default function RunPage() {
   const isTerminal = status && ['success', 'failed', 'error', 'human', 'cancelled'].includes(status);
   const pipelineStepStates = [...stepStates];
   const manualTask = record?.manual_task;
+  const manualActivity = manualTask?.phase === 'validating'
+      ? 'Validating the approved implementation'
+      : manualTask?.phase === 'applying'
+        ? 'Applying your code edits'
+        : manualTask?.phase === 'creating'
+          ? 'Creating the pull request'
+          : manualTask?.phase === 'updating'
+            ? 'Updating the ticket'
+            : status === 'awaiting-approval'
+              ? 'Waiting for an approval decision'
+              : null;
+  const handleManualStageCompleted = (updated: RunRecord) => {
+    setRecord(updated);
+    setStatus(updated.status);
+    setStepStates(updated.steps.map((step) => step.state));
+    setLogs(updated.logs);
+    setPrUrl(updated.pr_url);
+    setRunning(
+      updated.status !== 'awaiting-human'
+        ? !['success', 'failed', 'error', 'human'].includes(updated.status)
+        : manualTaskIsActive(updated.manual_task),
+    );
+    if (manualTaskIsActive(updated.manual_task)) {
+      startPolling(updated.id);
+    }
+  };
   if (record?.status === 'awaiting-human' && manualTask) {
     const waitingStageIndex = STEPS.findIndex(
       (step) => step.key === manualTask.stage_key,
     );
     if (waitingStageIndex !== -1) {
-      const automatedPhase = ['generating', 'validating', 'applying', 'verifying', 'creating', 'updating']
-        .includes(manualTask.phase);
+      const automatedPhase = manualTaskIsActive(manualTask);
       if (automatedPhase) {
         pipelineStepStates[waitingStageIndex] = 'in-progress';
       } else if (manualTaskNeedsHumanAction(manualTask)) {
@@ -377,8 +388,11 @@ export default function RunPage() {
               ) : 'Run Pipeline'}
             </button>
             {runId
-              && workflowMode !== 'manual'
-              && ['in-progress', 'awaiting-approval', 'cancelling'].includes(status ?? '')
+              && (
+                workflowMode === 'manual'
+                  ? ['awaiting-human', 'awaiting-approval', 'cancelling'].includes(status ?? '')
+                  : ['in-progress', 'awaiting-approval', 'cancelling'].includes(status ?? '')
+              )
               && (
                 <button
                   className="btn-secondary"
@@ -423,30 +437,29 @@ export default function RunPage() {
               </div>
             </div>
 
-            {record && <ManualStagePanel
-              run={record}
-              onCompleted={(updated) => {
-                setRecord(updated);
-                setStatus(updated.status);
-                setStepStates(updated.steps.map((step) => step.state));
-                setLogs(updated.logs);
-                setPrUrl(updated.pr_url);
-                setRunning(
-                  updated.status !== 'awaiting-human'
-                    ? !['success', 'failed', 'error', 'human'].includes(updated.status)
-                    : ['generating', 'validating', 'applying', 'verifying', 'creating', 'updating'].includes(updated.manual_task?.phase ?? ''),
-                );
-                if (['generating', 'validating', 'applying', 'verifying', 'creating', 'updating'].includes(updated.manual_task?.phase ?? '')) {
-                  startPolling(updated.id);
-                }
-              }}
-            />}
+            {record && (
+              <>
+                <ManualStagePanel
+                  run={record}
+                  onCompleted={handleManualStageCompleted}
+                />
+                {record.approval && <ApprovalPanel run={record} />}
+              </>
+            )}
+            {manualActivity && !manualTaskNeedsHumanAction(manualTask) && (
+              <div className="run-stage-activity" role="status">
+                <span className="run-stage-spinner" aria-hidden="true" />
+                <div>
+                  <strong>{manualActivity}</strong>
+                  <p>The workflow is continuing. Its stages and order are unchanged.</p>
+                </div>
+              </div>
+            )}
             {status === 'cancelling' && (
               <p style={{ color: 'var(--color-text-secondary)', fontSize: 13, marginTop: 0 }}>
                 Stop requested. The current operation will finish before the pipeline stops; later stages will not start.
               </p>
             )}
-            {record && <ApprovalPanel run={record} onDecided={(r) => { setRecord(r); setStatus(r.status); }} />}
 
             <div style={{ marginBottom: 28 }}>
               <StageProgress
@@ -513,5 +526,13 @@ export default function RunPage() {
 
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
     </div>
+  );
+}
+
+export default function RunPage() {
+  return (
+    <Suspense fallback={<div className="content">Loading run pipeline…</div>}>
+      <RunContent />
+    </Suspense>
   );
 }
